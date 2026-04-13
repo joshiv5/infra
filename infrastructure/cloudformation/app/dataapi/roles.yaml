@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DataAPI Application IAM Roles - S3 and EC2 access roles
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+
+  ProjectName:
+    Type: String
+    Description: Project name
+
+Resources:
+  # DataAPI S3 Role
+  DataAPIeS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-dataapi-s3-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: DataAPI
+        - Key: Purpose
+          Value: S3Access
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: dataapi
+
+  # DataAPI S3 Instance Profile (for EC2)
+  DataAPIeS3InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: DataAPIeS3Role
+    Properties:
+      InstanceProfileName: !Sub 'cf-dataapi-s3-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref DataAPIeS3Role
+
+  # DataAPI EC2 Role
+  DataAPIeEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-dataapi-ec2-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: DataAPI
+        - Key: Purpose
+          Value: EC2Access
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: dataapi
+
+  # DataAPI EC2 Instance Profile
+  DataAPIeEC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: DataAPIeEC2Role
+    Properties:
+      InstanceProfileName: !Sub 'cf-dataapi-ec2-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref DataAPIeEC2Role
+
+  # DataAPI Lambda Role
+  DataAPIeLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-dataapi-lambda-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: DataAPI
+        - Key: Purpose
+          Value: LambdaExecution
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: dataapi
+
+Outputs:
+  DataAPIeS3RoleArn:
+    Description: DataAPI S3 Role ARN
+    Value: !GetAtt DataAPIeS3Role.Arn
+    Export:
+      Name: !Sub 'cf-dataapi-s3-role-arn-${EnvironmentName}'
+
+  DataAPIeS3RoleName:
+    Description: DataAPI S3 Role Name
+    Value: !Ref DataAPIeS3Role
+    Export:
+      Name: !Sub 'cf-dataapi-s3-role-name-${EnvironmentName}'
+
+  DataAPIeS3InstanceProfileArn:
+    Description: DataAPI S3 Instance Profile ARN
+    Value: !GetAtt DataAPIeS3InstanceProfile.Arn
+    Export:
+      Name: !Sub 'cf-dataapi-s3-instance-profile-arn-${EnvironmentName}'
+
+  DataAPIeEC2RoleArn:
+    Description: DataAPI EC2 Role ARN
+    Value: !GetAtt DataAPIeEC2Role.Arn
+    Export:
+      Name: !Sub 'cf-dataapi-ec2-role-arn-${EnvironmentName}'
+
+  DataAPIeEC2RoleName:
+    Description: DataAPI EC2 Role Name
+    Value: !Ref DataAPIeEC2Role
+    Export:
+      Name: !Sub 'cf-dataapi-ec2-role-name-${EnvironmentName}'
+
+  DataAPIeEC2InstanceProfileArn:
+    Description: DataAPI EC2 Instance Profile ARN
+    Value: !GetAtt DataAPIeEC2InstanceProfile.Arn
+    Export:
+      Name: !Sub 'cf-dataapi-ec2-instance-profile-arn-${EnvironmentName}'
+
+  DataAPIeLambdaRoleArn:
+    Description: DataAPI Lambda Role ARN
+    Value: !GetAtt DataAPIeLambdaRole.Arn
+    Export:
+      Name: !Sub 'cf-dataapi-lambda-role-arn-${EnvironmentName}'
+
+  DataAPIeLambdaRoleName:
+    Description: DataAPI Lambda Role Name
+    Value: !Ref DataAPIeLambdaRole
+    Export:
+      Name: !Sub 'cf-dataapi-lambda-role-name-${EnvironmentName}'

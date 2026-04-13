@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "EnvironmentName",
+    "ParameterValue": "test"
+  },
+  {
+    "ParameterKey": "EnvironmentTag",
+    "ParameterValue": "test"
+  },
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "infrastructure"
+  }
+]

@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Main Orchestrator Template for IAM, S3, and KMS Infrastructure
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name (dev, test, prod)
+    AllowedValues:
+      - dev
+      - test
+      - prod
+  
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+  
+  ProjectName:
+    Type: String
+    Description: Project name for resource naming
+  
+  CoreTemplateURL:
+    Type: String
+    Description: URL of Core CloudFormation template in S3
+  
+  BaseTemplateURL:
+    Type: String
+    Description: URL of Base CloudFormation template in S3
+  
+  AppTemplateURL:
+    Type: String
+    Description: URL of App CloudFormation template in S3
+
+  CumulusRolesTemplateURL:
+    Type: String
+    Description: URL of Cumulus Roles CloudFormation template in S3
+
+  RetinaRolesTemplateURL:
+    Type: String
+    Description: URL of Retina Roles CloudFormation template in S3
+
+  DataAPIRolesTemplateURL:
+    Type: String
+    Description: URL of DataAPI Roles CloudFormation template in S3
+
+  LeanRetinaRolesTemplateURL:
+    Type: String
+    Description: URL of LeanRetina Roles CloudFormation template in S3
+  
+  DeployApp:
+    Type: String
+    Description: Deploy App Stack? Set to 'false' to skip for app-only updates
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+Conditions:
+  ShouldDeployApp: !Equals [!Ref DeployApp, 'true']
+
+Resources:
+  # Core Stack - IAM Roles (Unchanged in future)
+  CoreStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref CoreTemplateURL
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        EnvironmentTag: !Ref EnvironmentTag
+        ProjectName: !Ref ProjectName
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: StackType
+          Value: Core
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Base Stack - Base Policies (Limited changes)
+  BaseStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: CoreStack
+    Properties:
+      TemplateURL: !Ref BaseTemplateURL
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        EnvironmentTag: !Ref EnvironmentTag
+        ProjectName: !Ref ProjectName
+        S3BucketRoleArn: !GetAtt CoreStack.Outputs.S3BucketRoleArn
+        KMSKeyRoleArn: !GetAtt CoreStack.Outputs.KMSKeyRoleArn
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: StackType
+          Value: Base
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # App Stack - App Specific Policies and Roles (Frequent changes)
+  AppStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: ShouldDeployApp
+    DependsOn: BaseStack
+    Properties:
+      TemplateURL: !Ref AppTemplateURL
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        EnvironmentTag: !Ref EnvironmentTag
+        ProjectName: !Ref ProjectName
+        S3BucketName: !GetAtt BaseStack.Outputs.S3BucketName
+        KMSKeyId: !GetAtt BaseStack.Outputs.KMSKeyId
+        S3BucketRoleArn: !GetAtt CoreStack.Outputs.S3BucketRoleArn
+        CumulusRolesTemplateURL: !Ref CumulusRolesTemplateURL
+        RetinaRolesTemplateURL: !Ref RetinaRolesTemplateURL
+        DataAPIRolesTemplateURL: !Ref DataAPIRolesTemplateURL
+        LeanRetinaRolesTemplateURL: !Ref LeanRetinaRolesTemplateURL
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: StackType
+          Value: App
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  CoreStackId:
+    Description: Core Stack ID
+    Value: !Ref CoreStack
+    Export:
+      Name: !Sub '${ProjectName}-core-stack-id-${EnvironmentName}'
+
+  BaseStackId:
+    Description: Base Stack ID
+    Value: !Ref BaseStack
+    Export:
+      Name: !Sub '${ProjectName}-base-stack-id-${EnvironmentName}'
+
+  AppStackId:
+    Condition: ShouldDeployApp
+    Description: App Stack ID
+    Value: !Ref AppStack
+    Export:
+      Name: !Sub '${ProjectName}-app-stack-id-${EnvironmentName}'
+
+  # S3 Bucket Outputs
+  S3BucketName:
+    Description: S3 Bucket Name
+    Value: !GetAtt BaseStack.Outputs.S3BucketName
+    Export:
+      Name: !Sub '${ProjectName}-s3-bucket-${EnvironmentName}'
+
+  S3BucketArn:
+    Description: S3 Bucket ARN
+    Value: !GetAtt BaseStack.Outputs.S3BucketArn
+    Export:
+      Name: !Sub '${ProjectName}-s3-bucket-arn-${EnvironmentName}'
+
+  S3LoggingBucketName:
+    Description: S3 Logging Bucket Name
+    Value: !GetAtt BaseStack.Outputs.S3LoggingBucketName
+    Export:
+      Name: !Sub '${ProjectName}-s3-logs-bucket-${EnvironmentName}'
+
+  # KMS Key Outputs
+  KMSKeyId:
+    Description: KMS Key ID
+    Value: !GetAtt BaseStack.Outputs.KMSKeyId
+    Export:
+      Name: !Sub '${ProjectName}-kms-key-${EnvironmentName}'
+
+  KMSKeyArn:
+    Description: KMS Key ARN
+    Value: !GetAtt BaseStack.Outputs.KMSKeyArn
+    Export:
+      Name: !Sub '${ProjectName}-kms-key-arn-${EnvironmentName}'
+
+  KMSKeyAlias:
+    Description: KMS Key Alias
+    Value: !GetAtt BaseStack.Outputs.KMSKeyAlias
+    Export:
+      Name: !Sub '${ProjectName}-kms-key-alias-${EnvironmentName}'
+
+  # S3 Bucket IAM Role Outputs (from Core Stack)
+  S3BucketRoleArn:
+    Description: S3 Bucket IAM Role ARN
+    Value: !GetAtt CoreStack.Outputs.S3BucketRoleArn
+    Export:
+      Name: !Sub '${ProjectName}-s3-role-arn-${EnvironmentName}'
+
+  S3BucketRoleName:
+    Description: S3 Bucket IAM Role Name
+    Value: !GetAtt CoreStack.Outputs.S3BucketRoleName
+    Export:
+      Name: !Sub '${ProjectName}-s3-role-name-${EnvironmentName}'
+
+  S3BucketInstanceProfileArn:
+    Description: S3 Bucket Instance Profile ARN
+    Value: !GetAtt CoreStack.Outputs.S3BucketInstanceProfileArn
+    Export:
+      Name: !Sub '${ProjectName}-s3-instance-profile-arn-${EnvironmentName}'
+
+  # KMS Key IAM Role Outputs (from Core Stack)
+  KMSKeyRoleArn:
+    Description: KMS Key IAM Role ARN
+    Value: !GetAtt CoreStack.Outputs.KMSKeyRoleArn
+    Export:
+      Name: !Sub '${ProjectName}-kms-role-arn-${EnvironmentName}'
+
+  KMSKeyRoleName:
+    Description: KMS Key IAM Role Name
+    Value: !GetAtt CoreStack.Outputs.KMSKeyRoleName
+    Export:
+      Name: !Sub '${ProjectName}-kms-role-name-${EnvironmentName}'
+
+  # App Policies and Roles Outputs (from App Stack)
+  S3BucketAccessPolicyName:
+    Condition: ShouldDeployApp
+    Description: S3 Bucket Access Policy Name
+    Value: !GetAtt AppStack.Outputs.S3BucketAccessPolicyName
+    Export:
+      Name: !Sub '${ProjectName}-s3-policy-${EnvironmentName}'
+
+  KMSKeyAccessPolicyName:
+    Condition: ShouldDeployApp
+    Description: KMS Key Access Policy Name
+    Value: !GetAtt AppStack.Outputs.KMSKeyAccessPolicyName
+    Export:
+      Name: !Sub '${ProjectName}-kms-policy-${EnvironmentName}'
+
+  CloudWatchLogsPolicyName:
+    Condition: ShouldDeployApp
+    Description: CloudWatch Logs Policy Name
+    Value: !GetAtt AppStack.Outputs.CloudWatchLogsPolicyName
+    Export:
+      Name: !Sub '${ProjectName}-logs-policy-${EnvironmentName}'
+
+  AppServiceRoleArn:
+    Condition: ShouldDeployApp
+    Description: App Service Role ARN
+    Value: !GetAtt AppStack.Outputs.AppServiceRoleArn
+    Export:
+      Name: !Sub '${ProjectName}-app-service-role-arn-${EnvironmentName}'
+
+  AppServiceRoleName:
+    Condition: ShouldDeployApp
+    Description: App Service Role Name
+    Value: !GetAtt AppStack.Outputs.AppServiceRoleName
+    Export:
+      Name: !Sub '${ProjectName}-app-service-role-name-${EnvironmentName}'

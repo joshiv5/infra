@@ -1,0 +1,682 @@
+#!/usr/bin/env groovy
+
+/**
+ * Selective Stack Update Pipeline (Windows Compatible)
+ * Updates only specific stacks (Core, Base, or App) without updating others
+ * Usage: Update policies/resources in individual stacks independently
+ * Works on: Windows Jenkins agents
+ */
+
+pipeline {
+    agent any
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
+        timeout(time: 1, unit: 'HOURS')
+        timestamps()
+        disableConcurrentBuilds()
+    }
+    
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'test', 'prod'],
+            description: 'Select the environment to update'
+        )
+        booleanParam(
+            name: 'UPDATE_CORE',
+            defaultValue: false,
+            description: 'Update Core IAM Roles Stack'
+        )
+        booleanParam(
+            name: 'UPDATE_BASE',
+            defaultValue: false,
+            description: 'Update Base Stack (S3 + KMS)'
+        )
+        booleanParam(
+            name: 'UPDATE_APP',
+            defaultValue: false,
+            description: 'Update App Specific Policies Stack'
+        )
+        string(
+            name: 'AWS_REGION',
+            defaultValue: 'eu-central-1',
+            description: 'AWS region for deployment'
+        )
+        string(
+            name: 'CF_TEMPLATES_BUCKET',
+            defaultValue: 'ascend-test-poc',
+            description: 'S3 bucket containing CloudFormation templates'
+        )
+        string(
+            name: 'CHANGE_DESCRIPTION',
+            defaultValue: 'Policy/Resource Updates',
+            description: 'Description of changes for audit trail'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: true,
+            description: 'Preview changes via ChangeSets without applying'
+        )
+    }
+    
+    environment {
+        PROJECT_NAME = 'ascend'
+	    AWS_CREDS = credentials('aws-credentials')
+        AWS_DEFAULT_REGION = "${params.AWS_REGION}"
+        TEMPLATES_PATH = "${WORKSPACE}\\infrastructure\\cloudformation"
+        CONFIGS_PATH = "${WORKSPACE}\\infrastructure\\configs"
+        ENVIRONMENT = "${params.ENVIRONMENT}"
+        BUILD_TIMESTAMP = "${BUILD_ID}"
+    }
+    
+    stages {
+        stage('Pre-Flight Check') {
+            steps {
+                script {
+                    echo "========== Selective Stack Update =========="
+                    echo "Environment: ${ENVIRONMENT}"
+                    echo "AWS Region: ${AWS_DEFAULT_REGION}"
+                    echo "Change Description: ${params.CHANGE_DESCRIPTION}"
+                    echo "Dry Run: ${params.DRY_RUN}"
+                    echo ""
+                    echo "Stacks to Update:"
+                    echo "  - Core: ${params.UPDATE_CORE}"
+                    echo "  - Base: ${params.UPDATE_BASE}"
+                    echo "  - App: ${params.UPDATE_APP}"
+                    echo "==========================================="
+                    
+                    // Validate that at least one stack is selected
+                    if (!params.UPDATE_CORE && !params.UPDATE_BASE && !params.UPDATE_APP) {
+                        error("ERROR: At least one stack must be selected for update!")
+                    }
+                    
+                    // Production safety gates
+                    if (ENVIRONMENT == 'prod') {
+                        if (params.UPDATE_CORE) {
+                            echo "⚠️  WARNING: Updating CORE stack in PRODUCTION"
+                        }
+                        if (params.UPDATE_BASE) {
+                            echo "⚠️  WARNING: Updating BASE stack in PRODUCTION (affects S3/KMS)"
+                        }
+                        echo ""
+                        input(message: "Are you sure you want to update these stacks in PRODUCTION?", ok: 'Proceed')
+                    }
+                }
+            }
+        }
+        
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "Checking out source code..."
+                    checkout scm
+                }
+            }
+        }
+        
+        stage('Discover Nested Stacks') {
+            steps {
+                script {
+                    echo ""
+                    echo "Discovering nested stack names from main stack..."
+                    
+                    def mainStackName = "${PROJECT_NAME}-main-stack-${ENVIRONMENT}"
+                    
+                    // Query nested stacks from the main stack
+                    bat(script: """
+                        @echo off
+                        aws cloudformation describe-stack-resources ^
+                            --stack-name ${mainStackName} ^
+                            --region ${AWS_DEFAULT_REGION} ^
+                            --query "StackResources[?ResourceType=='AWS::CloudFormation::Stack'].{Logical:LogicalResourceId,Physical:PhysicalResourceId}" ^
+                            --output json > nested_stacks.json
+                    """, returnStatus: true)
+                    
+                    // Parse the JSON to extract stack names
+                    def nestedStacksJson = readFile('nested_stacks.json').trim()
+                    echo "Nested stacks found:"
+                    echo nestedStacksJson
+                    
+                    // Parse JSON using Groovy's built-in JsonSlurper
+                    def nestedStacks = []
+                    try {
+                        def jsonSlurper = new groovy.json.JsonSlurper()
+                        nestedStacks = jsonSlurper.parseText(nestedStacksJson)
+                    } catch (Exception e) {
+                        echo "Warning: Could not parse nested stacks JSON: ${e.message}"
+                        nestedStacks = []
+                    }
+                    
+                    // Initialize with defaults
+                    def coreStack = "${PROJECT_NAME}-core-stack-${ENVIRONMENT}"
+                    def baseStack = "${PROJECT_NAME}-base-stack-${ENVIRONMENT}"
+                    def appStack = "${PROJECT_NAME}-app-stack-${ENVIRONMENT}"
+                    
+                    // Override with discovered names if found
+                    if (nestedStacks && nestedStacks.size() > 0) {
+                        for (stack in nestedStacks) {
+                            if (stack.Logical.contains('Core') || stack.Physical.contains('Core')) {
+                                coreStack = stack.Physical
+                                echo "✓ Discovered Core stack: ${coreStack}"
+                            }
+                            if (stack.Logical.contains('Base') || stack.Physical.contains('Base')) {
+                                baseStack = stack.Physical
+                                echo "✓ Discovered Base stack: ${baseStack}"
+                            }
+                            if (stack.Logical.contains('App') || stack.Physical.contains('App')) {
+                                appStack = stack.Physical
+                                echo "✓ Discovered App stack: ${appStack}"
+                            }
+                        }
+                    }
+                    
+                    // Store discovered names in environment
+                    env.CORE_STACK_NAME = coreStack
+                    env.BASE_STACK_NAME = baseStack
+                    env.APP_STACK_NAME = appStack
+                    
+                    echo ""
+                    echo "Stack names resolved:"
+                    echo "  Core: ${env.CORE_STACK_NAME}"
+                    echo "  Base: ${env.BASE_STACK_NAME}"
+                    echo "  App: ${env.APP_STACK_NAME}"
+                    echo ""
+                }
+            }
+        }
+        
+        stage('Validate Templates') {
+            steps {
+                script {
+                    echo "Validating CloudFormation templates..."
+                    
+                    if (params.UPDATE_CORE) {
+                        echo "✓ Validating Core stack template..."
+                        bat """
+                            aws cloudformation validate-template ^
+                                --template-body file://${TEMPLATES_PATH}\\core\\core_iam_roles.yaml ^
+                                --region ${AWS_DEFAULT_REGION}
+                        """
+                    }
+                    
+                    if (params.UPDATE_BASE) {
+                        echo "✓ Validating Base stack template..."
+                        bat """
+                            aws cloudformation validate-template ^
+                                --template-body file://${TEMPLATES_PATH}\\base\\base_s3_kms.yaml ^
+                                --region ${AWS_DEFAULT_REGION}
+                        """
+                    }
+                    
+                    if (params.UPDATE_APP) {
+                        echo "✓ Validating App stack template..."
+                        bat """
+                            aws cloudformation validate-template ^
+                                --template-body file://${TEMPLATES_PATH}\\app\\app_policies.yaml ^
+                                --region ${AWS_DEFAULT_REGION}
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Upload Templates to S3') {
+            steps {
+                script {
+                    echo "Uploading templates to S3..."
+                    
+                    if (params.UPDATE_CORE) {
+                        bat """
+                            aws s3 cp ${TEMPLATES_PATH}\\core\\core_iam_roles.yaml ^
+                                s3://${params.CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/core/ ^
+                                --region ${AWS_DEFAULT_REGION}
+                            echo ✓ Core template uploaded
+                        """
+                    }
+                    
+                    if (params.UPDATE_BASE) {
+                        bat """
+                            aws s3 cp ${TEMPLATES_PATH}\\base\\base_s3_kms.yaml ^
+                                s3://${params.CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/base/ ^
+                                --region ${AWS_DEFAULT_REGION}
+                            echo ✓ Base template uploaded
+                        """
+                    }
+                    
+                    if (params.UPDATE_APP) {
+                        bat """
+                            aws s3 cp ${TEMPLATES_PATH}\\app\\app_policies.yaml ^
+                                s3://${params.CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/app/ ^
+                                --region ${AWS_DEFAULT_REGION}
+                            echo ✓ App template uploaded
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Generate ChangeSets') {
+            steps {
+                script {
+                    echo "Generating ChangeSets for review..."
+                    
+                    if (params.UPDATE_CORE) {
+                        createAndDisplayChangeSet('core', env.CORE_STACK_NAME)
+                    }
+                    
+                    if (params.UPDATE_BASE) {
+                        createAndDisplayChangeSet('base', env.BASE_STACK_NAME)
+                    }
+                    
+                    if (params.UPDATE_APP) {
+                        createAndDisplayChangeSet('app', env.APP_STACK_NAME)
+                    }
+                }
+            }
+        }
+        
+        stage('Review & Approval') {
+            when {
+                expression { params.ENVIRONMENT == 'prod' || params.DRY_RUN }
+            }
+            steps {
+                script {
+                    if (params.DRY_RUN) {
+                        echo ""
+                        echo "========== DRY RUN MODE =========="
+                        echo "ChangeSets have been created but not executed."
+                        echo "Review the changes above and re-run with DRY_RUN=false to apply."
+                        echo "=================================="
+                        echo ""
+                    } else if (ENVIRONMENT == 'prod') {
+                        input(message: "Review ChangeSets above. Approve to apply updates to PRODUCTION?", ok: 'Apply Updates')
+                    }
+                }
+            }
+        }
+        
+        stage('Apply Updates') {
+            when {
+                expression { !params.DRY_RUN }
+            }
+            steps {
+                script {
+                    echo ""
+                    echo "Applying stack updates..."
+                    
+                    if (params.UPDATE_CORE) {
+                        updateStack('core', env.CORE_STACK_NAME)
+                    }
+                    
+                    if (params.UPDATE_BASE) {
+                        updateStack('base', env.BASE_STACK_NAME)
+                    }
+                    
+                    if (params.UPDATE_APP) {
+                        updateStack('app', env.APP_STACK_NAME)
+                    }
+                    
+                    echo ""
+                    echo "✓ All selected stacks have been updated!"
+                }
+            }
+        }
+        
+        stage('Verification') {
+            when {
+                expression { !params.DRY_RUN }
+            }
+            steps {
+                script {
+                    echo ""
+                    echo "Verifying updated stacks..."
+                    
+                    if (params.UPDATE_CORE) {
+                        bat """
+                            echo Checking Core stack status...
+                            aws cloudformation describe-stacks ^
+                                --stack-name ${CORE_STACK_NAME} ^
+                                --query "Stacks[0].[StackStatus,StackStatusReason]" ^
+                                --region ${AWS_DEFAULT_REGION}
+                        """
+                    }
+                    
+                    if (params.UPDATE_BASE) {
+                        bat """
+                            echo Checking Base stack status...
+                            aws cloudformation describe-stacks ^
+                                --stack-name ${BASE_STACK_NAME} ^
+                                --query "Stacks[0].[StackStatus,StackStatusReason]" ^
+                                --region ${AWS_DEFAULT_REGION}
+                        """
+                    }
+                    
+                    if (params.UPDATE_APP) {
+                        bat """
+                            echo Checking App stack status...
+                            aws cloudformation describe-stacks ^
+                                --stack-name ${APP_STACK_NAME} ^
+                                --query "Stacks[0].[StackStatus,StackStatusReason]" ^
+                                --region ${AWS_DEFAULT_REGION}
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo ""
+                echo "========== Pipeline Summary =========="
+                echo "Build Status: ${currentBuild.result}"
+                echo "Environment: ${ENVIRONMENT}"
+                echo "Build ID: ${BUILD_TIMESTAMP}"
+                echo "====================================="
+            }
+        }
+        success {
+            script {
+                if (params.DRY_RUN) {
+                    echo "✓ Dry run completed successfully. Review changes and re-run with DRY_RUN=false to apply."
+                } else {
+                    echo "✓ Stack updates completed successfully!"
+                }
+            }
+        }
+        failure {
+            script {
+                echo "✗ Pipeline failed! Check the logs above for details."
+            }
+        }
+    }
+}
+
+/**
+ * Helper function: Create and display ChangeSet
+ */
+def createAndDisplayChangeSet(stackType, stackName) {
+    def changeSetName = "${stackType}-changeset-${BUILD_ID}"
+    def templateFile = "${TEMPLATES_PATH}\\${stackType}\\${getTemplateFileName(stackType)}"
+    def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\${stackType}_parameters.json"
+    
+    // For App stack, merge parameters from Base and Core stacks
+    if (stackType == 'app') {
+        paramFile = mergeApplicationParameters(paramFile)
+    }
+    
+    // Check if stack exists
+    def stackExists = bat(script: """
+        @echo off
+        aws cloudformation describe-stacks ^
+            --stack-name ${stackName} ^
+            --region ${AWS_DEFAULT_REGION} >nul 2>&1
+        if %errorlevel% equ 0 (exit /b 0) else (exit /b 1)
+    """, returnStatus: true) == 0
+    
+    def changeSetType = stackExists ? "UPDATE" : "CREATE"
+    
+    bat """
+        echo.
+        echo Creating ChangeSet for ${stackType} stack (Type: ${changeSetType})...
+        
+        aws cloudformation create-change-set ^
+            --stack-name ${stackName} ^
+            --change-set-name ${changeSetName} ^
+            --change-set-type ${changeSetType} ^
+            --template-body file://${templateFile} ^
+            --parameters file://${paramFile} ^
+            --capabilities CAPABILITY_NAMED_IAM ^
+            --region ${AWS_DEFAULT_REGION} || exit /b 0
+        
+        timeout /t 10 /nobreak
+        
+        echo.
+        echo ChangeSet for ${stackType.toUpperCase()} Stack (${changeSetType}):
+        echo ==========================================
+        aws cloudformation describe-change-set ^
+            --stack-name ${stackName} ^
+            --change-set-name ${changeSetName} ^
+            --region ${AWS_DEFAULT_REGION} ^
+            --query "Changes[*].[Type,ResourceChange.Action,ResourceChange.LogicalResourceId,ResourceChange.ResourceType]" ^
+            --output table || echo (No changes)
+        echo ==========================================
+    """
+}
+
+/**
+ * Helper function: Execute stack update or create
+ */
+def updateStack(stackType, stackName) {
+    def templateFile = "${TEMPLATES_PATH}\\${stackType}\\${getTemplateFileName(stackType)}"
+    def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\${stackType}_parameters.json"
+    
+    // For App stack, merge parameters from Base and Core stacks
+    if (stackType == 'app') {
+        paramFile = mergeApplicationParameters(paramFile)
+    }
+    
+    // Check if stack exists
+    def stackExists = bat(script: """
+        @echo off
+        aws cloudformation describe-stacks ^
+            --stack-name ${stackName} ^
+            --region ${AWS_DEFAULT_REGION} >nul 2>&1
+        if %errorlevel% equ 0 (exit /b 0) else (exit /b 1)
+    """, returnStatus: true) == 0
+    
+    if (stackExists) {
+        bat """
+            echo.
+            echo ========== UPDATING ${stackType.toUpperCase()} Stack ==========
+            
+            echo Stack exists. Performing UPDATE...
+            aws cloudformation update-stack ^
+                --stack-name ${stackName} ^
+                --template-body file://${templateFile} ^
+                --parameters file://${paramFile} ^
+                --capabilities CAPABILITY_NAMED_IAM ^
+                --region ${AWS_DEFAULT_REGION}
+            
+            echo Waiting for stack update to complete...
+            aws cloudformation wait stack-update-complete ^
+                --stack-name ${stackName} ^
+                --region ${AWS_DEFAULT_REGION} || exit /b 0
+            
+            echo ✓ ${stackType.toUpperCase()} stack updated successfully
+            echo.
+        """
+    } else {
+        bat """
+            echo.
+            echo ========== CREATING ${stackType.toUpperCase()} Stack ==========
+            
+            echo Stack does not exist. Performing CREATE...
+            aws cloudformation create-stack ^
+                --stack-name ${stackName} ^
+                --template-body file://${templateFile} ^
+                --parameters file://${paramFile} ^
+                --capabilities CAPABILITY_NAMED_IAM ^
+                --region ${AWS_DEFAULT_REGION}
+            
+            echo Waiting for stack creation to complete...
+            aws cloudformation wait stack-create-complete ^
+                --stack-name ${stackName} ^
+                --region ${AWS_DEFAULT_REGION}
+            
+            echo ✓ ${stackType.toUpperCase()} stack created successfully
+            echo.
+        """
+    }
+}
+
+/**
+ * Helper function: Get template filename for stack type
+ */
+def getTemplateFileName(stackType) {
+    def templates = [
+        'core': 'core_iam_roles.yaml',
+        'base': 'base_s3_kms.yaml',
+        'app': 'app_policies.yaml'
+    ]
+    return templates[stackType]
+}
+
+/**
+ * Helper function: Merge App parameters with outputs from Base and Core stacks
+ * Appends cross-stack parameters to the existing app parameters
+ */
+def mergeApplicationParameters(appParamFile) {
+    echo "Merging application parameters with stack outputs..."
+    
+    // Read the base app parameters
+    def appParams = readFile(appParamFile).trim()
+    echo "Original app parameters:"
+    echo appParams
+    
+    // Query Base stack outputs
+    bat(script: """
+        @echo off
+        aws cloudformation describe-stacks ^
+            --stack-name ${BASE_STACK_NAME} ^
+            --region ${AWS_DEFAULT_REGION} ^
+            --query "Stacks[0].Outputs[?OutputKey=='S3BucketName' || OutputKey=='KMSKeyId'].{Key:OutputKey,Value:OutputValue}" ^
+            --output json > base_outputs.json 2>nul
+    """, returnStatus: true)
+    
+    def baseOutputJson = readFile('base_outputs.json').trim()
+    echo "Base stack outputs: ${baseOutputJson}"
+    
+    // Extract S3BucketName and KMSKeyId using string operations
+    def s3BucketName = extractJsonValue(baseOutputJson, 'S3BucketName')
+    def kmsKeyId = extractJsonValue(baseOutputJson, 'KMSKeyId')
+    
+    // Query Core stack outputs
+    bat(script: """
+        @echo off
+        aws cloudformation describe-stacks ^
+            --stack-name ${CORE_STACK_NAME} ^
+            --region ${AWS_DEFAULT_REGION} ^
+            --query "Stacks[0].Outputs[?OutputKey=='S3BucketRoleArn'].{Key:OutputKey,Value:OutputValue}" ^
+            --output json > core_outputs.json 2>nul
+    """, returnStatus: true)
+    
+    def coreOutputJson = readFile('core_outputs.json').trim()
+    echo "Core stack outputs: ${coreOutputJson}"
+    
+    // Extract S3BucketRoleArn using string operations
+    def roleArn = extractJsonValue(coreOutputJson, 'S3BucketRoleArn')
+    
+    // Build merged parameters by appending cross-stack values
+    def mergedJson = new StringBuilder()
+    
+    // Remove outer brackets from app parameters and add them
+    if (appParams.startsWith('[') && appParams.endsWith(']')) {
+        mergedJson.append(appParams.substring(1, appParams.length() - 1))
+    } else {
+        mergedJson.append(appParams)
+    }
+    
+    // Append cross-stack outputs (only if they have values)
+    if (s3BucketName && s3BucketName.length() > 0) {
+        mergedJson.append(',')
+        mergedJson.append('{"ParameterKey":"S3BucketName","ParameterValue":"' + s3BucketName + '"}')
+        echo "✓ Added S3BucketName: ${s3BucketName}"
+    } else {
+        echo "⚠ Warning: S3BucketName extraction failed or returned empty"
+    }
+    
+    if (kmsKeyId && kmsKeyId.length() > 0) {
+        mergedJson.append(',')
+        mergedJson.append('{"ParameterKey":"KMSKeyId","ParameterValue":"' + kmsKeyId + '"}')
+        echo "✓ Added KMSKeyId: ${kmsKeyId}"
+    } else {
+        echo "⚠ Warning: KMSKeyId extraction failed or returned empty"
+    }
+    
+    if (roleArn && roleArn.length() > 0) {
+        mergedJson.append(',')
+        mergedJson.append('{"ParameterKey":"S3BucketRoleArn","ParameterValue":"' + roleArn + '"}')
+        echo "✓ Added S3BucketRoleArn: ${roleArn}"
+    } else {
+        echo "⚠ Warning: S3BucketRoleArn extraction failed or returned empty"
+    }
+    
+    // Wrap in brackets
+    def finalJson = '[' + mergedJson.toString() + ']'
+    
+    // Write merged parameters to file
+    def mergedParamFile = "${WORKSPACE}\\app_parameters_merged.json"
+    writeFile file: mergedParamFile, text: finalJson
+    
+    echo ""
+    echo "Final merged parameters:"
+    echo finalJson
+    echo ""
+    echo "✓ Merged parameters written to: ${mergedParamFile}"
+    return mergedParamFile
+}
+
+/**
+ * Helper function: Extract a value from JSON using simple string operations
+ * Handles JSON with or without spaces around colons
+ */
+def extractJsonValue(jsonStr, key) {
+    try {
+        // Debug: Check if JSON is empty or null
+        if (!jsonStr || jsonStr.trim().length() == 0 || jsonStr.trim() == '[]') {
+            echo "Debug: JSON output is empty for key: ${key}"
+            return ''
+        }
+        
+        // Search for the key (e.g., "S3BucketName")
+        def keyIndex = jsonStr.indexOf("\"${key}\"")
+        
+        echo "Debug: Searching for key '${key}' in JSON. Found at index: ${keyIndex}"
+        
+        if (keyIndex < 0) {
+            echo "Debug: Key not found: ${key}"
+            return ''
+        }
+        
+        // Find "Value" after the key
+        def valueKeyIndex = jsonStr.indexOf("\"Value\"", keyIndex)
+        
+        echo "Debug: Found 'Value' key at index: ${valueKeyIndex}"
+        
+        if (valueKeyIndex < 0) {
+            echo "Debug: Value key not found after ${key}"
+            return ''
+        }
+        
+        // Find the first quote after "Value" (skips past "Value": or "Value":")
+        def quoteStart = jsonStr.indexOf("\"", valueKeyIndex + "\"Value\"".length())
+        
+        echo "Debug: Found opening quote at index: ${quoteStart}"
+        
+        if (quoteStart < 0) {
+            echo "Debug: Could not find opening quote for value"
+            return ''
+        }
+        
+        // Find the closing quote
+        def quoteEnd = jsonStr.indexOf("\"", quoteStart + 1)
+        
+        echo "Debug: Found closing quote at index: ${quoteEnd}"
+        
+        if (quoteEnd < 0) {
+            echo "Debug: Could not find closing quote"
+            return ''
+        }
+        
+        // Extract the value between quotes
+        def extractedValue = jsonStr.substring(quoteStart + 1, quoteEnd)
+        echo "Debug: Extracted value for ${key}: ${extractedValue}"
+        return extractedValue
+    } catch (Exception e) {
+        echo "Warning: Could not extract ${key}: ${e.message}"
+        return ''
+    }
+}

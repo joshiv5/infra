@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: LeanRetina Application IAM Roles - S3 and EC2 access roles
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+
+  ProjectName:
+    Type: String
+    Description: Project name
+
+Resources:
+  # LeanRetina S3 Role
+  LeanRetinaS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-leanretina-s3-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: LeanRetina
+        - Key: Purpose
+          Value: S3Access
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: leanretina
+
+  # LeanRetina S3 Instance Profile (for EC2)
+  LeanRetinaS3InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: LeanRetinaS3Role
+    Properties:
+      InstanceProfileName: !Sub 'cf-leanretina-s3-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref LeanRetinaS3Role
+
+  # LeanRetina EC2 Role
+  LeanRetinaEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-leanretina-ec2-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: LeanRetina
+        - Key: Purpose
+          Value: EC2Access
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: leanretina
+
+  # LeanRetina EC2 Instance Profile
+  LeanRetinaEC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: LeanRetinaEC2Role
+    Properties:
+      InstanceProfileName: !Sub 'cf-leanretina-ec2-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref LeanRetinaEC2Role
+
+  # LeanRetina Lambda Role
+  LeanRetinaLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-leanretina-lambda-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: LeanRetina
+        - Key: Purpose
+          Value: LambdaExecution
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: leanretina
+
+Outputs:
+  LeanRetinaS3RoleArn:
+    Description: LeanRetina S3 Role ARN
+    Value: !GetAtt LeanRetinaS3Role.Arn
+    Export:
+      Name: !Sub 'cf-leanretina-s3-role-arn-${EnvironmentName}'
+
+  LeanRetinaS3RoleName:
+    Description: LeanRetina S3 Role Name
+    Value: !Ref LeanRetinaS3Role
+    Export:
+      Name: !Sub 'cf-leanretina-s3-role-name-${EnvironmentName}'
+
+  LeanRetinaS3InstanceProfileArn:
+    Description: LeanRetina S3 Instance Profile ARN
+    Value: !GetAtt LeanRetinaS3InstanceProfile.Arn
+    Export:
+      Name: !Sub 'cf-leanretina-s3-instance-profile-arn-${EnvironmentName}'
+
+  LeanRetinaEC2RoleArn:
+    Description: LeanRetina EC2 Role ARN
+    Value: !GetAtt LeanRetinaEC2Role.Arn
+    Export:
+      Name: !Sub 'cf-leanretina-ec2-role-arn-${EnvironmentName}'
+
+  LeanRetinaEC2RoleName:
+    Description: LeanRetina EC2 Role Name
+    Value: !Ref LeanRetinaEC2Role
+    Export:
+      Name: !Sub 'cf-leanretina-ec2-role-name-${EnvironmentName}'
+
+  LeanRetinaEC2InstanceProfileArn:
+    Description: LeanRetina EC2 Instance Profile ARN
+    Value: !GetAtt LeanRetinaEC2InstanceProfile.Arn
+    Export:
+      Name: !Sub 'cf-leanretina-ec2-instance-profile-arn-${EnvironmentName}'
+
+  LeanRetinaLambdaRoleArn:
+    Description: LeanRetina Lambda Role ARN
+    Value: !GetAtt LeanRetinaLambdaRole.Arn
+    Export:
+      Name: !Sub 'cf-leanretina-lambda-role-arn-${EnvironmentName}'
+
+  LeanRetinaLambdaRoleName:
+    Description: LeanRetina Lambda Role Name
+    Value: !Ref LeanRetinaLambdaRole
+    Export:
+      Name: !Sub 'cf-leanretina-lambda-role-name-${EnvironmentName}'

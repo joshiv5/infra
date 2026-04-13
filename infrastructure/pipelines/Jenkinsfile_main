@@ -1,0 +1,318 @@
+#!/usr/bin/env groovy
+
+/**
+ * Main Orchestrator Pipeline
+ * Deploys entire infrastructure stack hierarchy (Core -> Base -> App)
+ * Usage: Deploy all infrastructure components in proper order
+ */
+
+pipeline {
+    agent any
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
+        timeout(time: 1, unit: 'HOURS')
+        timestamps()
+    }
+    
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'test', 'prod'],
+            description: 'Select the environment to deploy to'
+        )
+        choice(
+            name: 'ACTION',
+            choices: ['CREATE', 'UPDATE', 'DELETE'],
+            description: 'CloudFormation action to perform'
+        )
+        booleanParam(
+            name: 'SKIP_CORE',
+            defaultValue: false,
+            description: 'Skip Core stack deployment (use existing)'
+        )
+        booleanParam(
+            name: 'SKIP_BASE',
+            defaultValue: false,
+            description: 'Skip Base stack deployment (use existing)'
+        )
+        string(
+            name: 'AWS_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS region for deployment'
+        )
+        string(
+            name: 'CF_TEMPLATES_BUCKET',
+            defaultValue: 'your-cf-templates-bucket',
+            description: 'S3 bucket containing CloudFormation templates'
+        )
+    }
+    
+    environment {
+        PROJECT_NAME = 'ascend'
+        AWS_DEFAULT_REGION = "${params.AWS_REGION}"
+        TEMPLATES_PATH = "${WORKSPACE}/infrastructure/cloudformation"
+        CONFIGS_PATH = "${WORKSPACE}/infrastructure/configs"
+        ENVIRONMENT = "${params.ENVIRONMENT}"
+        ACTION = "${params.ACTION}"
+    }
+    
+    stages {
+        stage('Validation') {
+            steps {
+                script {
+                    echo "========== Pipeline Configuration =========="
+                    echo "Project: ${PROJECT_NAME}"
+                    echo "Environment: ${ENVIRONMENT}"
+                    echo "Action: ${ACTION}"
+                    echo "AWS Region: ${AWS_DEFAULT_REGION}"
+                    echo "CF Templates Bucket: ${CF_TEMPLATES_BUCKET}"
+                    echo "Skip Core: ${params.SKIP_CORE}"
+                    echo "Skip Base: ${params.SKIP_BASE}"
+                    echo "==========================================="
+                    
+                    // Validate environment parameter
+                    if (!['dev', 'test', 'prod'].contains(ENVIRONMENT)) {
+                        error("Invalid environment: ${ENVIRONMENT}")
+                    }
+                    
+                    // Validate action parameter
+                    if (!['CREATE', 'UPDATE', 'DELETE'].contains(ACTION)) {
+                        error("Invalid action: ${ACTION}")
+                    }
+                    
+                    // Production approval gate
+                    if (ENVIRONMENT == 'prod' && ACTION in ['CREATE', 'DELETE']) {
+                        input(message: "Deploy to PRODUCTION? This is a critical action!", ok: 'Deploy')
+                    }
+                }
+            }
+        }
+        
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "Checking out source code..."
+                    checkout scm
+                }
+            }
+        }
+        
+        stage('Validate Templates') {
+            steps {
+                script {
+                    echo "Validating CloudFormation templates..."
+                    
+                    // Validate each template
+                    def templates = [
+                        'main/main_template.yaml',
+                        'core/core_iam_roles.yaml',
+                        'base/base_s3_kms.yaml',
+                        'app/app_policies.yaml'
+                    ]
+                    
+                    templates.each { template ->
+                        echo "Validating: ${template}"
+                        sh """
+                            aws cloudformation validate-template \
+                                --template-body file://${TEMPLATES_PATH}/${template} \
+                                --region ${AWS_DEFAULT_REGION}
+                        """
+                    }
+                    
+                    echo "✓ All templates validated successfully"
+                }
+            }
+        }
+        
+        stage('Upload Templates to S3') {
+            steps {
+                script {
+                    echo "Uploading templates to S3..."
+                    
+                    sh """
+                        aws s3 cp ${TEMPLATES_PATH}/core/core_iam_roles.yaml \
+                            s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/core/ \
+                            --region ${AWS_DEFAULT_REGION}
+                        
+                        aws s3 cp ${TEMPLATES_PATH}/base/base_s3_kms.yaml \
+                            s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/base/ \
+                            --region ${AWS_DEFAULT_REGION}
+                        
+                        aws s3 cp ${TEMPLATES_PATH}/app/app_policies.yaml \
+                            s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/app/ \
+                            --region ${AWS_DEFAULT_REGION}
+                    """
+                    
+                    echo "✓ Templates uploaded to S3"
+                }
+            }
+        }
+        
+        stage('Deploy Core Stack') {
+            when {
+                expression { !params.SKIP_CORE }
+            }
+            steps {
+                script {
+                    echo "Deploying Core Stack..."
+                    
+                    def stackName = "${PROJECT_NAME}-core-stack-${ENVIRONMENT}"
+                    def paramFile = "${CONFIGS_PATH}/${ENVIRONMENT}/core_parameters.json"
+                    def templatePath = "${TEMPLATES_PATH}/core/core_iam_roles.yaml"
+                    
+                    try {
+                        sh """
+                            ./infrastructure/pipelines/utilities/deploy_stack.sh \
+                                ${stackName} \
+                                ${templatePath} \
+                                ${paramFile} \
+                                ${ACTION} \
+                                ${AWS_DEFAULT_REGION}
+                        """
+                        
+                        echo "✓ Core Stack deployment successful"
+                    } catch (Exception e) {
+                        error("Core Stack deployment failed: ${e.message}")
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy Base Stack') {
+            when {
+                expression { !params.SKIP_BASE }
+            }
+            dependsOn: 'Deploy Core Stack'
+            steps {
+                script {
+                    echo "Deploying Base Stack..."
+                    
+                    def stackName = "${PROJECT_NAME}-base-stack-${ENVIRONMENT}"
+                    def paramFile = "${CONFIGS_PATH}/${ENVIRONMENT}/base_parameters.json"
+                    def templatePath = "${TEMPLATES_PATH}/base/base_s3_kms.yaml"
+                    
+                    try {
+                        sh """
+                            ./infrastructure/pipelines/utilities/deploy_stack.sh \
+                                ${stackName} \
+                                ${templatePath} \
+                                ${paramFile} \
+                                ${ACTION} \
+                                ${AWS_DEFAULT_REGION}
+                        """
+                        
+                        echo "✓ Base Stack deployment successful"
+                    } catch (Exception e) {
+                        error("Base Stack deployment failed: ${e.message}")
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy App Stack') {
+            steps {
+                script {
+                    echo "Deploying App Stack..."
+                    
+                    def stackName = "${PROJECT_NAME}-app-stack-${ENVIRONMENT}"
+                    def paramFile = "${CONFIGS_PATH}/${ENVIRONMENT}/app_parameters.json"
+                    def templatePath = "${TEMPLATES_PATH}/app/app_policies.yaml"
+                    
+                    try {
+                        sh """
+                            ./infrastructure/pipelines/utilities/deploy_stack.sh \
+                                ${stackName} \
+                                ${templatePath} \
+                                ${paramFile} \
+                                ${ACTION} \
+                                ${AWS_DEFAULT_REGION}
+                        """
+                        
+                        echo "✓ App Stack deployment successful"
+                    } catch (Exception e) {
+                        error("App Stack deployment failed: ${e.message}")
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy Main Stack') {
+            steps {
+                script {
+                    echo "Deploying Main Orchestrator Stack..."
+                    
+                    def stackName = "${PROJECT_NAME}-main-stack-${ENVIRONMENT}"
+                    def paramFile = "${CONFIGS_PATH}/${ENVIRONMENT}/main_parameters.json"
+                    def templatePath = "${TEMPLATES_PATH}/main/main_template.yaml"
+                    
+                    try {
+                        sh """
+                            ./infrastructure/pipelines/utilities/deploy_stack.sh \
+                                ${stackName} \
+                                ${templatePath} \
+                                ${paramFile} \
+                                ${ACTION} \
+                                ${AWS_DEFAULT_REGION}
+                        """
+                        
+                        echo "✓ Main Stack deployment successful"
+                    } catch (Exception e) {
+                        error("Main Stack deployment failed: ${e.message}")
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            when {
+                expression { params.ACTION == 'CREATE' || params.ACTION == 'UPDATE' }
+            }
+            steps {
+                script {
+                    echo "Verifying deployment..."
+                    
+                    sh """
+                        ./infrastructure/pipelines/utilities/verify_stacks.sh \
+                            ${PROJECT_NAME} \
+                            ${ENVIRONMENT} \
+                            ${AWS_DEFAULT_REGION}
+                    """
+                    
+                    echo "✓ Deployment verified"
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                echo "Pipeline execution completed"
+                
+                // Clean up workspace
+                cleanWs()
+            }
+        }
+        
+        success {
+            script {
+                echo "✓ Pipeline completed successfully"
+                
+                // Optional: Send success notification
+                if (ENVIRONMENT == 'prod') {
+                    echo "PRODUCTION deployment successful!"
+                }
+            }
+        }
+        
+        failure {
+            script {
+                echo "✗ Pipeline failed"
+                
+                // Optional: Send failure notification
+                echo "Deployment failed for ${ENVIRONMENT} environment"
+            }
+        }
+    }
+}

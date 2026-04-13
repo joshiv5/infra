@@ -1,0 +1,110 @@
+#!/usr/bin/env groovy
+
+/**
+ * Base Stack Deployment Pipeline
+ * Deploys Core Base Stack (S3 + KMS) - Limited changes
+ */
+
+pipeline {
+    agent any
+    
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 45, unit: 'MINUTES')
+        timestamps()
+    }
+    
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['dev', 'test', 'prod'],
+            description: 'Select the environment'
+        )
+        choice(
+            name: 'ACTION',
+            choices: ['CREATE', 'UPDATE', 'DELETE'],
+            description: 'CloudFormation action'
+        )
+        string(
+            name: 'AWS_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS region'
+        )
+        string(
+            name: 'CF_TEMPLATES_BUCKET',
+            defaultValue: 'your-cf-templates-bucket',
+            description: 'S3 bucket with templates'
+        )
+    }
+    
+    environment {
+        PROJECT_NAME = 'ascend'
+        STACK_TYPE = 'base'
+    }
+    
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    checkout scm
+                    
+                    echo "========== Base Stack Deployment =========="
+                    echo "Environment: ${params.ENVIRONMENT}"
+                    echo "Action: ${params.ACTION}"
+                    echo "Region: ${params.AWS_REGION}"
+                    echo "=========================================="
+                    
+                    // Production confirmation
+                    if (params.ENVIRONMENT == 'prod' && params.ACTION in ['DELETE']) {
+                        input(message: "Delete PRODUCTION Base Stack? This will delete S3 buckets and KMS keys!", ok: 'Proceed')
+                    }
+                }
+            }
+        }
+        
+        stage('Validate & Upload') {
+            steps {
+                script {
+                    // Validate template
+                    sh """
+                        aws cloudformation validate-template \
+                            --template-body file://infrastructure/cloudformation/base/base_s3_kms.yaml \
+                            --region ${params.AWS_REGION}
+                    """
+                    
+                    // Upload to S3
+                    sh """
+                        aws s3 cp infrastructure/cloudformation/base/base_s3_kms.yaml \
+                            s3://${params.CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/base/ \
+                            --region ${params.AWS_REGION}
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy') {
+            steps {
+                script {
+                    def stackName = "${PROJECT_NAME}-base-stack-${params.ENVIRONMENT}"
+                    def templatePath = "${WORKSPACE}/infrastructure/cloudformation/base/base_s3_kms.yaml"
+                    def paramFile = "${WORKSPACE}/infrastructure/configs/${params.ENVIRONMENT}/base_parameters.json"
+                    
+                    sh """
+                        ./infrastructure/pipelines/utilities/deploy_stack.sh \
+                            ${stackName} \
+                            ${templatePath} \
+                            ${paramFile} \
+                            ${params.ACTION} \
+                            ${params.AWS_REGION}
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}

@@ -1,0 +1,50 @@
+[
+  {
+    "ParameterKey": "EnvironmentName",
+    "ParameterValue": "test"
+  },
+  {
+    "ParameterKey": "EnvironmentTag",
+    "ParameterValue": "Testing"
+  },
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "ascend"
+  },
+  {
+    "ParameterKey": "CoreTemplateURL",
+    "ParameterValue": "https://s3.amazonaws.com/your-cf-templates-bucket/infrastructure/cloudformation/core/core_iam_roles.yaml"
+  },
+  {
+    "ParameterKey": "BaseTemplateURL",
+    "ParameterValue": "https://s3.amazonaws.com/your-cf-templates-bucket/infrastructure/cloudformation/base/base_s3_kms.yaml"
+  },
+  {
+    "ParameterKey": "AppTemplateURL",
+    "ParameterValue": "https://s3.amazonaws.com/your-cf-templates-bucket/infrastructure/cloudformation/app/app_policies.yaml"
+  },
+  {
+    "ParameterKey": "CumulusRolesTemplateURL",
+    "ParameterValue": "https://s3.amazonaws.com/your-cf-templates-bucket/infrastructure/cloudformation/app/app_cumulus_roles.yaml"
+  },
+  {
+    "ParameterKey": "RetinaRolesTemplateURL",
+    "ParameterValue": "https://s3.amazonaws.com/your-cf-templates-bucket/infrastructure/cloudformation/app/app_retina_roles.yaml"
+  },
+  {
+    "ParameterKey": "DataAPIRolesTemplateURL",
+    "ParameterValue": "https://s3.amazonaws.com/your-cf-templates-bucket/infrastructure/cloudformation/app/app_dataapi_roles.yaml"
+  },
+  {
+    "ParameterKey": "LeanRetinaRolesTemplateURL",
+    "ParameterValue": "https://s3.amazonaws.com/your-cf-templates-bucket/infrastructure/cloudformation/app/app_leanretina_roles.yaml"
+  },
+  {
+    "ParameterKey": "DeployApp",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "DeployAppRoles",
+    "ParameterValue": "true"
+  }
+]

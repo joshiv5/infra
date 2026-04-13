@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Core IAM Roles Template - Stable roles that won't change
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+
+  ProjectName:
+    Type: String
+    Description: Project name
+
+Resources:
+  # S3 Bucket IAM Role
+  S3BucketRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-s3-bucket-role-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Purpose
+          Value: S3Access
+        - Key: StackType
+          Value: Core
+
+  # S3 Bucket Instance Profile (for EC2)
+  S3BucketInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: S3BucketRole
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-s3-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref S3BucketRole
+
+  # KMS Key IAM Role
+  KMSKeyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-kms-key-role-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+                - s3.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Purpose
+          Value: KMSAccess
+        - Key: StackType
+          Value: Core
+
+Outputs:
+  S3BucketRoleArn:
+    Description: S3 Bucket Role ARN
+    Value: !GetAtt S3BucketRole.Arn
+
+  S3BucketRoleName:
+    Description: S3 Bucket Role Name
+    Value: !Ref S3BucketRole
+
+  S3BucketInstanceProfileArn:
+    Description: S3 Bucket Instance Profile ARN
+    Value: !GetAtt S3BucketInstanceProfile.Arn
+
+  KMSKeyRoleArn:
+    Description: KMS Key Role ARN
+    Value: !GetAtt KMSKeyRole.Arn
+
+  KMSKeyRoleName:
+    Description: KMS Key Role Name
+    Value: !Ref KMSKeyRole

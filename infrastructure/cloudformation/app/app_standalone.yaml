@@ -1,0 +1,201 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: App Standalone Template - Deploy only app policies when base infrastructure already exists
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+
+  ProjectName:
+    Type: String
+    Description: Project name
+
+Resources:
+  # S3 Bucket Access Policy
+  S3BucketAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-s3-access-policy-${EnvironmentName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListBucketContents
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetBucketLocation'
+              - 's3:GetBucketVersioning'
+            Resource: 
+              - !Sub 
+                - 'arn:aws:s3:::${S3Bucket}'
+                - S3Bucket: !ImportValue !Sub '${ProjectName}-s3-bucket-${EnvironmentName}'
+          - Sid: ReadWriteObjects
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:PutObject'
+              - 's3:DeleteObject'
+            Resource: 
+              - !Sub 
+                - 'arn:aws:s3:::${S3Bucket}/*'
+                - S3Bucket: !ImportValue !Sub '${ProjectName}-s3-bucket-${EnvironmentName}'
+          - Sid: ManageObjectTags
+            Effect: Allow
+            Action:
+              - 's3:GetObjectTagging'
+              - 's3:PutObjectTagging'
+            Resource: 
+              - !Sub 
+                - 'arn:aws:s3:::${S3Bucket}/*'
+                - S3Bucket: !ImportValue !Sub '${ProjectName}-s3-bucket-${EnvironmentName}'
+      Roles:
+        - !Select [5, !Split [':', !ImportValue !Sub '${ProjectName}-s3-role-arn-${EnvironmentName}']]
+
+  # KMS Key Access Policy
+  KMSKeyAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-kms-access-policy-${EnvironmentName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: UseKMSKeyForEncryption
+            Effect: Allow
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:DescribeKey'
+              - 'kms:Encrypt'
+              - 'kms:CreateGrant'
+            Resource: 
+              - !Sub 
+                - 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSKey}'
+                - KMSKey: !ImportValue !Sub '${ProjectName}-kms-key-${EnvironmentName}'
+          - Sid: UseKMSKeyAliases
+            Effect: Allow
+            Action:
+              - 'kms:ListAliases'
+              - 'kms:ListKeys'
+            Resource: '*'
+      Roles:
+        - !Select [5, !Split [':', !ImportValue !Sub '${ProjectName}-s3-role-arn-${EnvironmentName}']]
+
+  # CloudWatch Logs Policy for monitoring
+  CloudWatchLogsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-cloudwatch-logs-policy-${EnvironmentName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CreateLogGroup
+            Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              - 'logs:DescribeLogGroups'
+              - 'logs:DescribeLogStreams'
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${ProjectName}/*'
+      Roles:
+        - !Select [5, !Split [':', !ImportValue !Sub '${ProjectName}-s3-role-arn-${EnvironmentName}']]
+
+  # Application-specific IAM Role for service-to-service communication
+  AppServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-app-service-role-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+                - states.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: StackType
+          Value: App
+        - Key: Purpose
+          Value: ApplicationServices
+
+  # Attach App-specific inline policies
+  AppServiceS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-app-s3-policy-${EnvironmentName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AppS3Access
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetObject'
+              - 's3:PutObject'
+            Resource:
+              - !Sub 
+                - 'arn:aws:s3:::${S3Bucket}'
+                - S3Bucket: !ImportValue !Sub '${ProjectName}-s3-bucket-${EnvironmentName}'
+              - !Sub 
+                - 'arn:aws:s3:::${S3Bucket}/*'
+                - S3Bucket: !ImportValue !Sub '${ProjectName}-s3-bucket-${EnvironmentName}'
+          - Sid: AppKMSAccess
+            Effect: Allow
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+            Resource: 
+              - !Sub 
+                - 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSKey}'
+                - KMSKey: !ImportValue !Sub '${ProjectName}-kms-key-${EnvironmentName}'
+      Roles:
+        - !Ref AppServiceRole
+
+Outputs:
+  S3BucketAccessPolicyName:
+    Description: S3 Bucket Access Policy Name
+    Value: !Ref S3BucketAccessPolicy
+
+  KMSKeyAccessPolicyName:
+    Description: KMS Key Access Policy Name
+    Value: !Ref KMSKeyAccessPolicy
+
+  CloudWatchLogsPolicyName:
+    Description: CloudWatch Logs Policy Name
+    Value: !Ref CloudWatchLogsPolicy
+
+  AppServiceRoleArn:
+    Description: App Service Role ARN
+    Value: !GetAtt AppServiceRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-app-service-role-arn-${EnvironmentName}'
+
+  AppServiceRoleName:
+    Description: App Service Role Name
+    Value: !Ref AppServiceRole
+    Export:
+      Name: !Sub '${ProjectName}-app-service-role-name-${EnvironmentName}'
+
+# NOTE: This template uses !ImportValue to reference existing CloudFormation exports
+# Required exports that must exist (from main stack):
+#   - ${ProjectName}-s3-role-arn-${EnvironmentName}
+#   - ${ProjectName}-s3-bucket-${EnvironmentName}
+#   - ${ProjectName}-kms-key-${EnvironmentName}
+# Usage: Deploy this template ONLY after core and base stacks are successfully deployed

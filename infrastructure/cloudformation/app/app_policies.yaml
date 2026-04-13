@@ -1,0 +1,311 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: App Specific Policies Template - Frequent changes per sprint or requirement
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+
+  ProjectName:
+    Type: String
+    Description: Project name
+
+  S3BucketName:
+    Type: String
+    Description: S3 Bucket Name from Base Stack
+
+  KMSKeyId:
+    Type: String
+    Description: KMS Key ID from Base Stack
+
+  S3BucketRoleArn:
+    Type: String
+    Description: S3 Bucket Role ARN from Core Stack
+
+  CumulusRolesTemplateURL:
+    Type: String
+    Description: URL of Cumulus Roles CloudFormation template in S3
+
+  RetinaRolesTemplateURL:
+    Type: String
+    Description: URL of Retina Roles CloudFormation template in S3
+
+  DataAPIRolesTemplateURL:
+    Type: String
+    Description: URL of DataAPI Roles CloudFormation template in S3
+
+  LeanRetinaRolesTemplateURL:
+    Type: String
+    Description: URL of LeanRetina Roles CloudFormation template in S3
+
+Resources:
+  # Cumulus Application Roles
+  CumulusRolesStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref CumulusRolesTemplateURL
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        EnvironmentTag: !Ref EnvironmentTag
+        ProjectName: !Ref ProjectName
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: Cumulus
+        - Key: StackType
+          Value: AppRoles
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Retina Application Roles
+  RetinaRolesStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref RetinaRolesTemplateURL
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        EnvironmentTag: !Ref EnvironmentTag
+        ProjectName: !Ref ProjectName
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: Retina
+        - Key: StackType
+          Value: AppRoles
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # DataAPI Application Roles
+  DataAPIRolesStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref DataAPIRolesTemplateURL
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        EnvironmentTag: !Ref EnvironmentTag
+        ProjectName: !Ref ProjectName
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: DataAPI
+        - Key: StackType
+          Value: AppRoles
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # LeanRetina Application Roles
+  LeanRetinaRolesStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref LeanRetinaRolesTemplateURL
+      Parameters:
+        EnvironmentName: !Ref EnvironmentName
+        EnvironmentTag: !Ref EnvironmentTag
+        ProjectName: !Ref ProjectName
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: LeanRetina
+        - Key: StackType
+          Value: AppRoles
+        - Key: ManagedBy
+          Value: CloudFormation
+
+
+  # S3 Bucket Access Policy
+  S3BucketAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-s3-access-policy-${EnvironmentName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListBucketContents
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetBucketLocation'
+              - 's3:GetBucketVersioning'
+            Resource: !Sub 'arn:aws:s3:::${S3BucketName}'
+          - Sid: ReadWriteObjects
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:GetObjectVersion'
+              - 's3:PutObject'
+              - 's3:DeleteObject'
+            Resource: !Sub 'arn:aws:s3:::${S3BucketName}/*'
+          - Sid: ManageObjectTags
+            Effect: Allow
+            Action:
+              - 's3:GetObjectTagging'
+              - 's3:PutObjectTagging'
+            Resource: !Sub 'arn:aws:s3:::${S3BucketName}/*'
+      Roles:
+        - !Select [1, !Split ['/', !Select [5, !Split [':', !Ref S3BucketRoleArn]]]]
+
+  # KMS Key Access Policy
+  KMSKeyAccessPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-kms-access-policy-${EnvironmentName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: UseKMSKeyForEncryption
+            Effect: Allow
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+              - 'kms:DescribeKey'
+              - 'kms:Encrypt'
+              - 'kms:CreateGrant'
+            Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSKeyId}'
+          - Sid: UseKMSKeyAliases
+            Effect: Allow
+            Action:
+              - 'kms:ListAliases'
+              - 'kms:ListKeys'
+            Resource: '*'
+      Roles:
+        - !Select [1, !Split ['/', !Select [5, !Split [':', !Ref S3BucketRoleArn]]]]
+
+  # CloudWatch Logs Policy for monitoring
+  CloudWatchLogsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-cloudwatch-logs-policy-${EnvironmentName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CreateLogGroup
+            Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              - 'logs:DescribeLogGroups'
+              - 'logs:DescribeLogStreams'
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${ProjectName}/*'
+          - Sid: CloudWatchLogsInsights
+            Effect: Allow
+            Action:
+              - 'logs:CreateLogDelivery'
+              - 'logs:GetLogDelivery'
+              - 'logs:UpdateLogDelivery'
+              - 'logs:DeleteLogDelivery'
+              - 'logs:ListLogDeliveries'
+            Resource: '*'
+      Roles:
+        - !Select [1, !Split ['/', !Select [5, !Split [':', !Ref S3BucketRoleArn]]]]
+
+  # Application-specific IAM Role for service-to-service communication
+  AppServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-app-service-role-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+                - states.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/CloudWatchLogsFullAccess'
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: StackType
+          Value: App
+        - Key: Purpose
+          Value: ApplicationServices
+
+  # Attach App-specific inline policies
+  AppServiceS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ProjectName}-app-s3-policy-${EnvironmentName}'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AppS3Access
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+              - 's3:GetObject'
+              - 's3:PutObject'
+            Resource:
+              - !Sub 'arn:aws:s3:::${S3BucketName}'
+              - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+          - Sid: AppKMSAccess
+            Effect: Allow
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey'
+            Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSKeyId}'
+      Roles:
+        - !Ref AppServiceRole
+
+Outputs:
+  S3BucketAccessPolicyName:
+    Description: S3 Bucket Access Policy Name
+    Value: !Ref S3BucketAccessPolicy
+
+  KMSKeyAccessPolicyName:
+    Description: KMS Key Access Policy Name
+    Value: !Ref KMSKeyAccessPolicy
+
+  CloudWatchLogsPolicyName:
+    Description: CloudWatch Logs Policy Name
+    Value: !Ref CloudWatchLogsPolicy
+
+  AppServiceRoleArn:
+    Description: App Service Role ARN
+    Value: !GetAtt AppServiceRole.Arn
+
+  AppServiceRoleName:
+    Description: App Service Role Name
+    Value: !Ref AppServiceRole
+
+  # Cumulus Application Stack Outputs
+  CumulusStackId:
+    Description: Cumulus Roles Stack ID
+    Value: !Ref CumulusRolesStack
+
+
+  # Retina Application Stack Outputs
+  RetinaStackId:
+    Description: Retina Roles Stack ID
+    Value: !Ref RetinaRolesStack
+
+  # DataAPI Application Stack Outputs
+  DataAPIStackId:
+    Description: DataAPI Roles Stack ID
+    Value: !Ref DataAPIRolesStack
+
+  # LeanRetina Application Stack Outputs
+  LeanRetinaStackId:
+    Description: LeanRetina Roles Stack ID
+    Value: !Ref LeanRetinaRolesStack
+
+  TestDeploymentInfo:
+    Description: Test deployment information and timestamp
+    Value: !Sub '${ProjectName}-${EnvironmentName} updated on ${AWS::StackName}'
+

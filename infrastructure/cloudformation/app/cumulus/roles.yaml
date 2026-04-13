@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cumulus Application IAM Roles - S3 and EC2 access roles
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+
+  ProjectName:
+    Type: String
+    Description: Project name
+
+Resources:
+  # Cumulus S3 Role
+  CumulusS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-cumulus-s3-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: Cumulus
+        - Key: Purpose
+          Value: S3Access
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: cumulus
+
+  # Cumulus S3 Instance Profile (for EC2)
+  CumulusS3InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: CumulusS3Role
+    Properties:
+      InstanceProfileName: !Sub 'cf-cumulus-s3-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref CumulusS3Role
+
+  # Cumulus EC2 Role
+  CumulusEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-cumulus-ec2-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: Cumulus
+        - Key: Purpose
+          Value: EC2Access
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: cumulus
+
+  # Cumulus EC2 Instance Profile
+  CumulusEC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: CumulusEC2Role
+    Properties:
+      InstanceProfileName: !Sub 'cf-cumulus-ec2-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref CumulusEC2Role
+
+  # Cumulus Lambda Role
+  CumulusLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-cumulus-lambda-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: Cumulus
+        - Key: Purpose
+          Value: LambdaExecution
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: cumulus
+
+Outputs:
+  CumulusS3RoleArn:
+    Description: Cumulus S3 Role ARN
+    Value: !GetAtt CumulusS3Role.Arn
+    Export:
+      Name: !Sub 'cf-cumulus-s3-role-arn-${EnvironmentName}'
+
+  CumulusS3RoleName:
+    Description: Cumulus S3 Role Name
+    Value: !Ref CumulusS3Role
+    Export:
+      Name: !Sub 'cf-cumulus-s3-role-name-${EnvironmentName}'
+
+  CumulusS3InstanceProfileArn:
+    Description: Cumulus S3 Instance Profile ARN
+    Value: !GetAtt CumulusS3InstanceProfile.Arn
+    Export:
+      Name: !Sub 'cf-cumulus-s3-instance-profile-arn-${EnvironmentName}'
+
+  CumulusEC2RoleArn:
+    Description: Cumulus EC2 Role ARN
+    Value: !GetAtt CumulusEC2Role.Arn
+    Export:
+      Name: !Sub 'cf-cumulus-ec2-role-arn-${EnvironmentName}'
+
+  CumulusEC2RoleName:
+    Description: Cumulus EC2 Role Name
+    Value: !Ref CumulusEC2Role
+    Export:
+      Name: !Sub 'cf-cumulus-ec2-role-name-${EnvironmentName}'
+
+  CumulusEC2InstanceProfileArn:
+    Description: Cumulus EC2 Instance Profile ARN
+    Value: !GetAtt CumulusEC2InstanceProfile.Arn
+    Export:
+      Name: !Sub 'cf-cumulus-ec2-instance-profile-arn-${EnvironmentName}'
+
+  CumulusLambdaRoleArn:
+    Description: Cumulus Lambda Role ARN
+    Value: !GetAtt CumulusLambdaRole.Arn
+    Export:
+      Name: !Sub 'cf-cumulus-lambda-role-arn-${EnvironmentName}'
+
+  CumulusLambdaRoleName:
+    Description: Cumulus Lambda Role Name
+    Value: !Ref CumulusLambdaRole
+    Export:
+      Name: !Sub 'cf-cumulus-lambda-role-name-${EnvironmentName}'

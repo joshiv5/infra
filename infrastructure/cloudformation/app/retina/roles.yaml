@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Retina Application IAM Roles - S3 and EC2 access roles
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+
+  ProjectName:
+    Type: String
+    Description: Project name
+
+Resources:
+  # Retina S3 Role
+  RetinaS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-retina-s3-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: Retina
+        - Key: Purpose
+          Value: S3Access
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: retina
+
+  # Retina S3 Instance Profile (for EC2)
+  RetinaS3InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: RetinaS3Role
+    Properties:
+      InstanceProfileName: !Sub 'cf-retina-s3-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref RetinaS3Role
+
+  # Retina EC2 Role
+  RetinaEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-retina-ec2-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: Retina
+        - Key: Purpose
+          Value: EC2Access
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: retina
+
+  # Retina EC2 Instance Profile
+  RetinaEC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: RetinaEC2Role
+    Properties:
+      InstanceProfileName: !Sub 'cf-retina-ec2-instance-profile-${EnvironmentName}'
+      Path: /
+      Roles:
+        - !Ref RetinaEC2Role
+
+  # Retina Lambda Role
+  RetinaLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'cf-retina-lambda-roles-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: Retina
+        - Key: Purpose
+          Value: LambdaExecution
+        - Key: StackType
+          Value: Application
+        - Key: AppType
+          Value: retina
+
+Outputs:
+  RetinaS3RoleArn:
+    Description: Retina S3 Role ARN
+    Value: !GetAtt RetinaS3Role.Arn
+    Export:
+      Name: !Sub 'cf-retina-s3-role-arn-${EnvironmentName}'
+
+  RetinaS3RoleName:
+    Description: Retina S3 Role Name
+    Value: !Ref RetinaS3Role
+    Export:
+      Name: !Sub 'cf-retina-s3-role-name-${EnvironmentName}'
+
+  RetinaS3InstanceProfileArn:
+    Description: Retina S3 Instance Profile ARN
+    Value: !GetAtt RetinaS3InstanceProfile.Arn
+    Export:
+      Name: !Sub 'cf-retina-s3-instance-profile-arn-${EnvironmentName}'
+
+  RetinaEC2RoleArn:
+    Description: Retina EC2 Role ARN
+    Value: !GetAtt RetinaEC2Role.Arn
+    Export:
+      Name: !Sub 'cf-retina-ec2-role-arn-${EnvironmentName}'
+
+  RetinaEC2RoleName:
+    Description: Retina EC2 Role Name
+    Value: !Ref RetinaEC2Role
+    Export:
+      Name: !Sub 'cf-retina-ec2-role-name-${EnvironmentName}'
+
+  RetinaEC2InstanceProfileArn:
+    Description: Retina EC2 Instance Profile ARN
+    Value: !GetAtt RetinaEC2InstanceProfile.Arn
+    Export:
+      Name: !Sub 'cf-retina-ec2-instance-profile-arn-${EnvironmentName}'
+
+  RetinaLambdaRoleArn:
+    Description: Retina Lambda Role ARN
+    Value: !GetAtt RetinaLambdaRole.Arn
+    Export:
+      Name: !Sub 'cf-retina-lambda-role-arn-${EnvironmentName}'
+
+  RetinaLambdaRoleName:
+    Description: Retina Lambda Role Name
+    Value: !Ref RetinaLambdaRole
+    Export:
+      Name: !Sub 'cf-retina-lambda-role-name-${EnvironmentName}'

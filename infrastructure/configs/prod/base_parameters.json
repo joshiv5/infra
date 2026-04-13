@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "EnvironmentName",
+    "ParameterValue": "prod"
+  },
+  {
+    "ParameterKey": "EnvironmentTag",
+    "ParameterValue": "Production"
+  },
+  {
+    "ParameterKey": "ProjectName",
+    "ParameterValue": "ascend"
+  }
+]

@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Base S3 Bucket and KMS Key Template - Limited changes, foundational resources
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  EnvironmentTag:
+    Type: String
+    Description: Environment tag value
+
+  ProjectName:
+    Type: String
+    Description: Project name
+
+  S3BucketRoleArn:
+    Type: String
+    Description: S3 Bucket Role ARN from Core Stack
+
+  KMSKeyRoleArn:
+    Type: String
+    Description: KMS Key Role ARN from Core Stack
+
+Conditions:
+  IsProd: !Equals [!Ref EnvironmentName, 'prod']
+  IsTest: !Equals [!Ref EnvironmentName, 'test']
+  IsDev: !Equals [!Ref EnvironmentName, 'dev']
+
+Resources:
+
+  # KMS Key for S3 Encryption
+  S3EncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'KMS key for S3 bucket encryption in ${EnvironmentName} environment'
+      EnableKeyRotation: true
+
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+
+          - Sid: EnableRootPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: 'kms:*'
+            Resource: '*'
+
+    # Allow IAM user Chinmay (CRITICAL FIX)
+          - Sid: AllowDeploymentUser
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/Chinmay
+            Action: 'kms:*'
+            Resource: '*'
+
+# CloudFormation / Admin Role access
+          - Sid: AllowKeyAdminRole
+            Effect: Allow
+            Principal:
+              AWS: !Ref KMSKeyRoleArn
+            Action: 'kms:*'
+            Resource: '*'
+
+          - Sid: AllowS3Encryption
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:DescribeKey
+            Resource: '*'
+
+  # KMS Key Alias
+  S3EncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-s3-${EnvironmentName}'
+      TargetKeyId: !Ref S3EncryptionKey
+
+  # Logging Bucket
+  S3LoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-logs-${EnvironmentName}-${AWS::AccountId}'
+
+  # Main Bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-bucket-${EnvironmentName}-${AWS::AccountId}'
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt S3EncryptionKey.Arn
+            BucketKeyEnabled: true
+
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 90
+
+          - Id: TransitionToGlacier
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 180
+                StorageClass: GLACIER
+
+Outputs:
+  S3BucketName:
+    Description: S3 Bucket Name
+    Value: !Ref S3Bucket
+
+  S3BucketArn:
+    Description: S3 Bucket ARN
+    Value: !GetAtt S3Bucket.Arn
+
+  S3LoggingBucketName:
+    Description: S3 Logging Bucket Name
+    Value: !Ref S3LoggingBucket
+
+  KMSKeyId:
+    Description: KMS Key ID
+    Value: !Ref S3EncryptionKey
+
+  KMSKeyArn:
+    Description: KMS Key ARN
+    Value: !GetAtt S3EncryptionKey.Arn
+
+  KMSKeyAlias:
+    Description: KMS Key Alias
+    Value: !Ref S3EncryptionKeyAlias
