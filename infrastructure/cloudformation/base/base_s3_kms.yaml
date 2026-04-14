@@ -51,11 +51,11 @@ Resources:
             Action: 'kms:*'
             Resource: '*'
 
-    # Allow IAM user Chinmay (CRITICAL FIX)
+    # Allow IAM user VarunJ (CRITICAL FIX)
           - Sid: AllowDeploymentUser
             Effect: Allow
             Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/Chinmay
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/Varunj
             Action: 'kms:*'
             Resource: '*'
 
