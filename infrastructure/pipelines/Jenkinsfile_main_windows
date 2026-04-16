@@ -23,7 +23,7 @@ pipeline {
         )
         choice(
             name: 'ACTION',
-            choices: ['CREATE', 'UPDATE', 'DELETE'],
+            choices: ['CREATE', 'DELETE'],
             description: 'CloudFormation action to perform'
         )
         string(
