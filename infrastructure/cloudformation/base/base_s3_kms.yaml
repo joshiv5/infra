@@ -55,7 +55,7 @@ Resources:
           - Sid: AllowDeploymentUser
             Effect: Allow
             Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/VarunJ
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/Varunj
             Action: 'kms:*'
             Resource: '*'
 
