@@ -1,14 +1,14 @@
 [
   {
     "ParameterKey": "EnvironmentName",
-    "ParameterValue": "prod"
+    "ParameterValue": "dev"
   },
   {
     "ParameterKey": "EnvironmentTag",
-    "ParameterValue": "Production"
+    "ParameterValue": "Development"
   },
   {
     "ParameterKey": "ProjectName",
-    "ParameterValue": "ascend"
+    "ParameterValue": "cctest"
   }
 ]

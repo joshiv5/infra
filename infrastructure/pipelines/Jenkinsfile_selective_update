@@ -49,6 +49,16 @@ pipeline {
             description: 'S3 bucket containing CloudFormation templates'
         )
         string(
+            name: 'S3_TEMPLATES_PREFIX',
+            defaultValue: 'infrastructure/cloudformation',
+            description: 'S3 key prefix for CloudFormation templates (no leading/trailing slash)'
+        )
+        string(
+            name: 'AWS_CREDENTIALS_ID',
+            defaultValue: 'aws-credentials',
+            description: 'Jenkins credentials ID for AWS access'
+        )
+        string(
             name: 'CHANGE_DESCRIPTION',
             defaultValue: 'Policy/Resource Updates',
             description: 'Description of changes for audit trail'
@@ -61,9 +71,9 @@ pipeline {
     }
     
     environment {
-        PROJECT_NAME = 'ascend'
-	    AWS_CREDS = credentials('aws-credentials')
+	    AWS_CREDS = credentials("${params.AWS_CREDENTIALS_ID}")
         AWS_DEFAULT_REGION = "${params.AWS_REGION}"
+        S3_TEMPLATES_PREFIX = "${params.S3_TEMPLATES_PREFIX}"
         TEMPLATES_PATH = "${WORKSPACE}\\infrastructure\\cloudformation"
         CONFIGS_PATH = "${WORKSPACE}\\infrastructure\\configs"
         ENVIRONMENT = "${params.ENVIRONMENT}"
@@ -74,6 +84,12 @@ pipeline {
         stage('Pre-Flight Check') {
             steps {
                 script {
+                    // Read PROJECT_NAME from parameters.json
+                    def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\parameters.json"
+                    def paramJson = readFile(paramFile).trim()
+                    env.PROJECT_NAME = extractParameterValue(paramJson, 'ProjectName')
+                    echo "Project Name from parameters.json: ${PROJECT_NAME}"
+
                     echo "========== Selective Stack Update =========="
                     echo "Environment: ${ENVIRONMENT}"
                     echo "AWS Region: ${AWS_DEFAULT_REGION}"
@@ -83,7 +99,11 @@ pipeline {
                     echo "Stacks to Update:"
                     echo "  - Core: ${params.UPDATE_CORE}"
                     echo "  - Base: ${params.UPDATE_BASE}"
-                    echo "  - App: ${params.UPDATE_APP}"
+                    if (params.UPDATE_APP) {
+                        echo "  - App: ✓ (Cumulus, DataAPI, LeanRetina, Retina)"
+                    } else {
+                        echo "  - App: false"
+                    }
                     echo "==========================================="
                     
                     // Validate that at least one stack is selected
@@ -123,64 +143,96 @@ pipeline {
                     
                     def mainStackName = "${PROJECT_NAME}-main-stack-${ENVIRONMENT}"
                     
-                    // Query nested stacks from the main stack
-                    bat(script: """
+                    // Verify main stack exists before discovery
+                    def mainExists = bat(script: """
+                        @echo off
+                        aws cloudformation describe-stacks ^
+                            --stack-name ${mainStackName} ^
+                            --region ${AWS_DEFAULT_REGION} >nul 2>&1
+                        if %errorlevel% equ 0 (exit /b 0) else (exit /b 1)
+                    """, returnStatus: true) == 0
+
+                    if (!mainExists) {
+                        error "Main stack '${mainStackName}' not found. Run the main pipeline first to create the stacks before using selective update."
+                    }
+
+                    // Level 1: Query direct nested stacks from the main stack (Core, Base, App)
+                    bat """
                         @echo off
                         aws cloudformation describe-stack-resources ^
                             --stack-name ${mainStackName} ^
                             --region ${AWS_DEFAULT_REGION} ^
                             --query "StackResources[?ResourceType=='AWS::CloudFormation::Stack'].{Logical:LogicalResourceId,Physical:PhysicalResourceId}" ^
                             --output json > nested_stacks.json
-                    """, returnStatus: true)
+                    """
                     
-                    // Parse the JSON to extract stack names
                     def nestedStacksJson = readFile('nested_stacks.json').trim()
-                    echo "Nested stacks found:"
+                    echo "Main stack nested stacks:"
                     echo nestedStacksJson
                     
-                    // Parse JSON using Groovy's built-in JsonSlurper
-                    def nestedStacks = []
-                    try {
-                        def jsonSlurper = new groovy.json.JsonSlurper()
-                        nestedStacks = jsonSlurper.parseText(nestedStacksJson)
-                    } catch (Exception e) {
-                        echo "Warning: Could not parse nested stacks JSON: ${e.message}"
-                        nestedStacks = []
+                    // Resolve Core, Base, App physical stack names
+                    def mainDefaults = [:] as HashMap
+                    def mainStacks = resolveStackNames(nestedStacksJson, mainDefaults)
+
+                    if (!mainStacks.containsKey('CoreStack')) {
+                        error "Could not discover CoreStack from main stack '${mainStackName}'. Ensure the main pipeline has been run successfully."
                     }
-                    
-                    // Initialize with defaults
-                    def coreStack = "${PROJECT_NAME}-core-stack-${ENVIRONMENT}"
-                    def baseStack = "${PROJECT_NAME}-base-stack-${ENVIRONMENT}"
-                    def appStack = "${PROJECT_NAME}-app-stack-${ENVIRONMENT}"
-                    
-                    // Override with discovered names if found
-                    if (nestedStacks && nestedStacks.size() > 0) {
-                        for (stack in nestedStacks) {
-                            if (stack.Logical.contains('Core') || stack.Physical.contains('Core')) {
-                                coreStack = stack.Physical
-                                echo "✓ Discovered Core stack: ${coreStack}"
-                            }
-                            if (stack.Logical.contains('Base') || stack.Physical.contains('Base')) {
-                                baseStack = stack.Physical
-                                echo "✓ Discovered Base stack: ${baseStack}"
-                            }
-                            if (stack.Logical.contains('App') || stack.Physical.contains('App')) {
-                                appStack = stack.Physical
-                                echo "✓ Discovered App stack: ${appStack}"
-                            }
-                        }
+                    if (!mainStacks.containsKey('BaseStack')) {
+                        error "Could not discover BaseStack from main stack '${mainStackName}'. Ensure the main pipeline has been run successfully."
                     }
-                    
-                    // Store discovered names in environment
-                    env.CORE_STACK_NAME = coreStack
-                    env.BASE_STACK_NAME = baseStack
-                    env.APP_STACK_NAME = appStack
+
+                    env.CORE_STACK_NAME = mainStacks['CoreStack']
+                    env.BASE_STACK_NAME = mainStacks['BaseStack']
+                    env.APP_STACK_NAME = mainStacks.containsKey('AppStack') ? mainStacks['AppStack'] : ''
                     
                     echo ""
-                    echo "Stack names resolved:"
+                    echo "Level 1 - Main stack children:"
                     echo "  Core: ${env.CORE_STACK_NAME}"
                     echo "  Base: ${env.BASE_STACK_NAME}"
-                    echo "  App: ${env.APP_STACK_NAME}"
+                    echo "  App:  ${env.APP_STACK_NAME ?: '(not deployed)'}" 
+
+                    // Level 2: Query nested stacks inside AppStack (Cumulus, Retina, DataAPI, LeanRetina)
+                    if (params.UPDATE_APP) {
+                        if (!env.APP_STACK_NAME) {
+                            error "AppStack not found in main stack. Cannot update app role stacks. Run the main pipeline with DEPLOY_APP=true first."
+                        }
+
+                        bat """
+                            @echo off
+                            aws cloudformation describe-stack-resources ^
+                                --stack-name ${env.APP_STACK_NAME} ^
+                                --region ${AWS_DEFAULT_REGION} ^
+                                --query "StackResources[?ResourceType=='AWS::CloudFormation::Stack'].{Logical:LogicalResourceId,Physical:PhysicalResourceId}" ^
+                                --output json > app_nested_stacks.json
+                        """
+
+                        def appNestedJson = readFile('app_nested_stacks.json').trim()
+                        echo ""
+                        echo "App stack nested stacks:"
+                        echo appNestedJson
+
+                        def appDefaults = [:] as HashMap
+                        def appStacks = resolveStackNames(appNestedJson, appDefaults)
+
+                        // Validate all 4 role stacks were discovered
+                        for (roleName in ['CumulusRolesStack', 'DataAPIRolesStack', 'LeanRetinaRolesStack', 'RetinaRolesStack']) {
+                            if (!appStacks.containsKey(roleName)) {
+                                error "Could not discover ${roleName} from AppStack. Ensure the main pipeline has been run successfully."
+                            }
+                        }
+
+                        env.CUMULUS_STACK_NAME = appStacks['CumulusRolesStack']
+                        env.DATAAPI_STACK_NAME = appStacks['DataAPIRolesStack']
+                        env.LEANRETINA_STACK_NAME = appStacks['LeanRetinaRolesStack']
+                        env.RETINA_STACK_NAME = appStacks['RetinaRolesStack']
+
+                        echo ""
+                        echo "Level 2 - App stack children:"
+                        echo "  Cumulus:     ${env.CUMULUS_STACK_NAME}"
+                        echo "  DataAPI:     ${env.DATAAPI_STACK_NAME}"
+                        echo "  LeanRetina:  ${env.LEANRETINA_STACK_NAME}"
+                        echo "  Retina:      ${env.RETINA_STACK_NAME}"
+                    }
                     echo ""
                 }
             }
@@ -210,12 +262,21 @@ pipeline {
                     }
                     
                     if (params.UPDATE_APP) {
-                        echo "✓ Validating App stack template..."
+                        echo "✓ Validating App stack templates..."
+                        echo "  - Validating app_policies..."
                         bat """
                             aws cloudformation validate-template ^
                                 --template-body file://${TEMPLATES_PATH}\\app\\app_policies.yaml ^
                                 --region ${AWS_DEFAULT_REGION}
                         """
+                        for (appType in ['cumulus', 'dataapi', 'leanretina', 'retina']) {
+                            echo "  - Validating ${appType}..."
+                            bat """
+                                aws cloudformation validate-template ^
+                                    --template-body file://${TEMPLATES_PATH}\\app\\${appType}\\roles.yaml ^
+                                    --region ${AWS_DEFAULT_REGION}
+                            """
+                        }
                     }
                 }
             }
@@ -229,7 +290,7 @@ pipeline {
                     if (params.UPDATE_CORE) {
                         bat """
                             aws s3 cp ${TEMPLATES_PATH}\\core\\core_iam_roles.yaml ^
-                                s3://${params.CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/core/ ^
+                                s3://${params.CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/core/ ^
                                 --region ${AWS_DEFAULT_REGION}
                             echo ✓ Core template uploaded
                         """
@@ -238,7 +299,7 @@ pipeline {
                     if (params.UPDATE_BASE) {
                         bat """
                             aws s3 cp ${TEMPLATES_PATH}\\base\\base_s3_kms.yaml ^
-                                s3://${params.CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/base/ ^
+                                s3://${params.CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/base/ ^
                                 --region ${AWS_DEFAULT_REGION}
                             echo ✓ Base template uploaded
                         """
@@ -247,10 +308,18 @@ pipeline {
                     if (params.UPDATE_APP) {
                         bat """
                             aws s3 cp ${TEMPLATES_PATH}\\app\\app_policies.yaml ^
-                                s3://${params.CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/app/ ^
+                                s3://${params.CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/app/ ^
                                 --region ${AWS_DEFAULT_REGION}
-                            echo ✓ App template uploaded
+                            echo ✓ app_policies template uploaded
                         """
+                        for (appType in ['cumulus', 'dataapi', 'leanretina', 'retina']) {
+                            bat """
+                                aws s3 cp ${TEMPLATES_PATH}\\app\\${appType}\\roles.yaml ^
+                                    s3://${params.CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/app/${appType}/ ^
+                                    --region ${AWS_DEFAULT_REGION}
+                                echo ✓ ${appType} template uploaded
+                            """
+                        }
                     }
                 }
             }
@@ -271,6 +340,10 @@ pipeline {
                     
                     if (params.UPDATE_APP) {
                         createAndDisplayChangeSet('app', env.APP_STACK_NAME)
+                        createAndDisplayChangeSet('cumulus', env.CUMULUS_STACK_NAME)
+                        createAndDisplayChangeSet('dataapi', env.DATAAPI_STACK_NAME)
+                        createAndDisplayChangeSet('leanretina', env.LEANRETINA_STACK_NAME)
+                        createAndDisplayChangeSet('retina', env.RETINA_STACK_NAME)
                     }
                 }
             }
@@ -315,6 +388,10 @@ pipeline {
                     
                     if (params.UPDATE_APP) {
                         updateStack('app', env.APP_STACK_NAME)
+                        updateStack('cumulus', env.CUMULUS_STACK_NAME)
+                        updateStack('dataapi', env.DATAAPI_STACK_NAME)
+                        updateStack('leanretina', env.LEANRETINA_STACK_NAME)
+                        updateStack('retina', env.RETINA_STACK_NAME)
                     }
                     
                     echo ""
@@ -354,12 +431,23 @@ pipeline {
                     
                     if (params.UPDATE_APP) {
                         bat """
-                            echo Checking App stack status...
+                            echo Checking app stack status...
                             aws cloudformation describe-stacks ^
                                 --stack-name ${APP_STACK_NAME} ^
                                 --query "Stacks[0].[StackStatus,StackStatusReason]" ^
                                 --region ${AWS_DEFAULT_REGION}
                         """
+                        for (appType in ['cumulus', 'dataapi', 'leanretina', 'retina']) {
+                            def stackVar = appType.toUpperCase() + '_STACK_NAME'
+                            def stackName = env[stackVar]
+                            bat """
+                                echo Checking ${appType} stack status...
+                                aws cloudformation describe-stacks ^
+                                    --stack-name ${stackName} ^
+                                    --query "Stacks[0].[StackStatus,StackStatusReason]" ^
+                                    --region ${AWS_DEFAULT_REGION}
+                            """
+                        }
                     }
                 }
             }
@@ -399,42 +487,58 @@ pipeline {
  */
 def createAndDisplayChangeSet(stackType, stackName) {
     def changeSetName = "${stackType}-changeset-${BUILD_ID}"
-    def templateFile = "${TEMPLATES_PATH}\\${stackType}\\${getTemplateFileName(stackType)}"
-    def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\${stackType}_parameters.json"
     
-    // For App stack, merge parameters from Base and Core stacks
+    // Construct S3 template URL based on stack type
+    def templateUrl = getTemplateUrl(stackType)
+    
+    // Construct parameter file path - use consolidated parameters.json for all stacks
+    def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\parameters.json"
+    
     if (stackType == 'app') {
-        paramFile = mergeApplicationParameters(paramFile)
+        // For app_policies, inject template URLs and stack outputs
+        paramFile = buildAppPoliciesParameters(paramFile)
+    } else if (stackType == 'core') {
+        // Core stack only needs base parameters
+        paramFile = mergeCoreStackParameters(paramFile)
+    } else if (stackType == 'base') {
+        // For Base stack, merge Core stack outputs
+        paramFile = mergeBaseStackParameters(paramFile)
     }
-    
-    // Check if stack exists
-    def stackExists = bat(script: """
-        @echo off
-        aws cloudformation describe-stacks ^
-            --stack-name ${stackName} ^
-            --region ${AWS_DEFAULT_REGION} >nul 2>&1
-        if %errorlevel% equ 0 (exit /b 0) else (exit /b 1)
-    """, returnStatus: true) == 0
-    
-    def changeSetType = stackExists ? "UPDATE" : "CREATE"
+    // Individual app stacks (cumulus, dataapi, leanretina, retina) only need
+    // base parameters (EnvironmentName, EnvironmentTag, ProjectName) - no merging needed
     
     bat """
         echo.
-        echo Creating ChangeSet for ${stackType} stack (Type: ${changeSetType})...
+        echo Creating UPDATE ChangeSet for ${stackType} stack...
+        echo Stack: ${stackName}
+        echo Template: ${templateUrl}
         
         aws cloudformation create-change-set ^
             --stack-name ${stackName} ^
             --change-set-name ${changeSetName} ^
-            --change-set-type ${changeSetType} ^
-            --template-body file://${templateFile} ^
+            --change-set-type UPDATE ^
+            --template-url ${templateUrl} ^
             --parameters file://${paramFile} ^
             --capabilities CAPABILITY_NAMED_IAM ^
-            --region ${AWS_DEFAULT_REGION} || exit /b 0
+            --region ${AWS_DEFAULT_REGION}
         
-        timeout /t 10 /nobreak
+        echo Waiting for changeset to be created...
+        aws cloudformation wait change-set-create-complete ^
+            --stack-name ${stackName} ^
+            --change-set-name ${changeSetName} ^
+            --region ${AWS_DEFAULT_REGION} 2>nul || echo (ChangeSet may have no changes)
         
         echo.
-        echo ChangeSet for ${stackType.toUpperCase()} Stack (${changeSetType}):
+        echo ChangeSet Status:
+        aws cloudformation describe-change-set ^
+            --stack-name ${stackName} ^
+            --change-set-name ${changeSetName} ^
+            --region ${AWS_DEFAULT_REGION} ^
+            --query "[Status, StatusReason]" ^
+            --output text
+        
+        echo.
+        echo ChangeSet for ${stackType.toUpperCase()} Stack:
         echo ==========================================
         aws cloudformation describe-change-set ^
             --stack-name ${stackName} ^
@@ -450,233 +554,233 @@ def createAndDisplayChangeSet(stackType, stackName) {
  * Helper function: Execute stack update or create
  */
 def updateStack(stackType, stackName) {
-    def templateFile = "${TEMPLATES_PATH}\\${stackType}\\${getTemplateFileName(stackType)}"
-    def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\${stackType}_parameters.json"
+    // Construct S3 template URL based on stack type
+    def templateUrl = getTemplateUrl(stackType)
     
-    // For App stack, merge parameters from Base and Core stacks
+    // Construct parameter file path - use consolidated parameters.json for all stacks
+    def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\parameters.json"
+    
     if (stackType == 'app') {
-        paramFile = mergeApplicationParameters(paramFile)
+        // For app_policies, inject template URLs and stack outputs
+        paramFile = buildAppPoliciesParameters(paramFile)
+    } else if (stackType == 'core') {
+        // Core stack only needs base parameters
+        paramFile = mergeCoreStackParameters(paramFile)
+    } else if (stackType == 'base') {
+        // For Base stack, merge Core stack outputs
+        paramFile = mergeBaseStackParameters(paramFile)
     }
+    // Individual app stacks (cumulus, dataapi, leanretina, retina) only need
+    // base parameters (EnvironmentName, EnvironmentTag, ProjectName) - no merging needed
     
-    // Check if stack exists
-    def stackExists = bat(script: """
-        @echo off
-        aws cloudformation describe-stacks ^
+    bat """
+        echo.
+        echo ========== UPDATING ${stackType.toUpperCase()} Stack ==========
+        
+        aws cloudformation update-stack ^
             --stack-name ${stackName} ^
-            --region ${AWS_DEFAULT_REGION} >nul 2>&1
-        if %errorlevel% equ 0 (exit /b 0) else (exit /b 1)
-    """, returnStatus: true) == 0
-    
-    if (stackExists) {
-        bat """
-            echo.
-            echo ========== UPDATING ${stackType.toUpperCase()} Stack ==========
-            
-            echo Stack exists. Performing UPDATE...
-            aws cloudformation update-stack ^
-                --stack-name ${stackName} ^
-                --template-body file://${templateFile} ^
-                --parameters file://${paramFile} ^
-                --capabilities CAPABILITY_NAMED_IAM ^
-                --region ${AWS_DEFAULT_REGION}
-            
-            echo Waiting for stack update to complete...
-            aws cloudformation wait stack-update-complete ^
-                --stack-name ${stackName} ^
-                --region ${AWS_DEFAULT_REGION} || exit /b 0
-            
-            echo ✓ ${stackType.toUpperCase()} stack updated successfully
-            echo.
-        """
-    } else {
-        bat """
-            echo.
-            echo ========== CREATING ${stackType.toUpperCase()} Stack ==========
-            
-            echo Stack does not exist. Performing CREATE...
-            aws cloudformation create-stack ^
-                --stack-name ${stackName} ^
-                --template-body file://${templateFile} ^
-                --parameters file://${paramFile} ^
-                --capabilities CAPABILITY_NAMED_IAM ^
-                --region ${AWS_DEFAULT_REGION}
-            
-            echo Waiting for stack creation to complete...
-            aws cloudformation wait stack-create-complete ^
-                --stack-name ${stackName} ^
-                --region ${AWS_DEFAULT_REGION}
-            
-            echo ✓ ${stackType.toUpperCase()} stack created successfully
-            echo.
-        """
-    }
+            --template-url ${templateUrl} ^
+            --parameters file://${paramFile} ^
+            --capabilities CAPABILITY_NAMED_IAM ^
+            --region ${AWS_DEFAULT_REGION}
+        
+        echo Waiting for stack update to complete...
+        aws cloudformation wait stack-update-complete ^
+            --stack-name ${stackName} ^
+            --region ${AWS_DEFAULT_REGION}
+        
+        echo ✓ ${stackType.toUpperCase()} stack updated successfully
+        echo.
+    """
 }
 
 /**
- * Helper function: Get template filename for stack type
+ * Helper function: Get S3 template URL for a stack type
  */
-def getTemplateFileName(stackType) {
+def getTemplateUrl(stackType) {
+    def s3Base = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}"
     def templates = [
-        'core': 'core_iam_roles.yaml',
-        'base': 'base_s3_kms.yaml',
-        'app': 'app_policies.yaml'
+        'core': "${s3Base}/core/core_iam_roles.yaml",
+        'base': "${s3Base}/base/base_s3_kms.yaml",
+        'app': "${s3Base}/app/app_policies.yaml",
+        'cumulus': "${s3Base}/app/cumulus/roles.yaml",
+        'dataapi': "${s3Base}/app/dataapi/roles.yaml",
+        'leanretina': "${s3Base}/app/leanretina/roles.yaml",
+        'retina': "${s3Base}/app/retina/roles.yaml"
     ]
     return templates[stackType]
 }
 
 /**
- * Helper function: Merge App parameters with outputs from Base and Core stacks
- * Appends cross-stack parameters to the existing app parameters
+ * Helper function: Core Stack only needs base parameters (EnvironmentName, EnvironmentTag, ProjectName)
+ * No stack outputs needed - just return the base parameter file as-is
  */
-def mergeApplicationParameters(appParamFile) {
-    echo "Merging application parameters with stack outputs..."
-    
-    // Read the base app parameters
-    def appParams = readFile(appParamFile).trim()
-    echo "Original app parameters:"
-    echo appParams
-    
-    // Query Base stack outputs
-    bat(script: """
-        @echo off
-        aws cloudformation describe-stacks ^
-            --stack-name ${BASE_STACK_NAME} ^
-            --region ${AWS_DEFAULT_REGION} ^
-            --query "Stacks[0].Outputs[?OutputKey=='S3BucketName' || OutputKey=='KMSKeyId'].{Key:OutputKey,Value:OutputValue}" ^
-            --output json > base_outputs.json 2>nul
-    """, returnStatus: true)
-    
-    def baseOutputJson = readFile('base_outputs.json').trim()
-    echo "Base stack outputs: ${baseOutputJson}"
-    
-    // Extract S3BucketName and KMSKeyId using string operations
-    def s3BucketName = extractJsonValue(baseOutputJson, 'S3BucketName')
-    def kmsKeyId = extractJsonValue(baseOutputJson, 'KMSKeyId')
-    
-    // Query Core stack outputs
-    bat(script: """
+def mergeCoreStackParameters(coreParamFile) {
+    echo "Core stack uses base parameters only - no merging needed"
+    return coreParamFile
+}
+
+/**
+ * Helper function: Merge Base Stack parameters with specific Core stack outputs
+ * Base template only needs S3BucketRoleArn and KMSKeyRoleArn from Core stack
+ */
+def mergeBaseStackParameters(baseParamFile) {
+    echo "Fetching specific Core stack outputs for Base stack..."
+
+    def baseParams = readFile(baseParamFile).trim()
+    echo "Original base parameters: ${baseParams}"
+
+    def s3BucketRoleArn = bat(script: """
         @echo off
         aws cloudformation describe-stacks ^
             --stack-name ${CORE_STACK_NAME} ^
             --region ${AWS_DEFAULT_REGION} ^
-            --query "Stacks[0].Outputs[?OutputKey=='S3BucketRoleArn'].{Key:OutputKey,Value:OutputValue}" ^
-            --output json > core_outputs.json 2>nul
-    """, returnStatus: true)
-    
-    def coreOutputJson = readFile('core_outputs.json').trim()
-    echo "Core stack outputs: ${coreOutputJson}"
-    
-    // Extract S3BucketRoleArn using string operations
-    def roleArn = extractJsonValue(coreOutputJson, 'S3BucketRoleArn')
-    
-    // Build merged parameters by appending cross-stack values
-    def mergedJson = new StringBuilder()
-    
-    // Remove outer brackets from app parameters and add them
-    if (appParams.startsWith('[') && appParams.endsWith(']')) {
-        mergedJson.append(appParams.substring(1, appParams.length() - 1))
-    } else {
-        mergedJson.append(appParams)
-    }
-    
-    // Append cross-stack outputs (only if they have values)
-    if (s3BucketName && s3BucketName.length() > 0) {
-        mergedJson.append(',')
-        mergedJson.append('{"ParameterKey":"S3BucketName","ParameterValue":"' + s3BucketName + '"}')
-        echo "✓ Added S3BucketName: ${s3BucketName}"
-    } else {
-        echo "⚠ Warning: S3BucketName extraction failed or returned empty"
-    }
-    
-    if (kmsKeyId && kmsKeyId.length() > 0) {
-        mergedJson.append(',')
-        mergedJson.append('{"ParameterKey":"KMSKeyId","ParameterValue":"' + kmsKeyId + '"}')
-        echo "✓ Added KMSKeyId: ${kmsKeyId}"
-    } else {
-        echo "⚠ Warning: KMSKeyId extraction failed or returned empty"
-    }
-    
-    if (roleArn && roleArn.length() > 0) {
-        mergedJson.append(',')
-        mergedJson.append('{"ParameterKey":"S3BucketRoleArn","ParameterValue":"' + roleArn + '"}')
-        echo "✓ Added S3BucketRoleArn: ${roleArn}"
-    } else {
-        echo "⚠ Warning: S3BucketRoleArn extraction failed or returned empty"
-    }
-    
-    // Wrap in brackets
-    def finalJson = '[' + mergedJson.toString() + ']'
-    
-    // Write merged parameters to file
-    def mergedParamFile = "${WORKSPACE}\\app_parameters_merged.json"
+            --query "Stacks[0].Outputs[?OutputKey=='S3BucketRoleArn'].OutputValue" ^
+            --output text
+    """, returnStdout: true).trim()
+    echo "S3BucketRoleArn: ${s3BucketRoleArn}"
+
+    def kmsKeyRoleArn = bat(script: """
+        @echo off
+        aws cloudformation describe-stacks ^
+            --stack-name ${CORE_STACK_NAME} ^
+            --region ${AWS_DEFAULT_REGION} ^
+            --query "Stacks[0].Outputs[?OutputKey=='KMSKeyRoleArn'].OutputValue" ^
+            --output text
+    """, returnStdout: true).trim()
+    echo "KMSKeyRoleArn: ${kmsKeyRoleArn}"
+
+    def extraEntries = '{"ParameterKey":"S3BucketRoleArn","ParameterValue":"' + s3BucketRoleArn + '"},' +
+        '{"ParameterKey":"KMSKeyRoleArn","ParameterValue":"' + kmsKeyRoleArn + '"}'
+
+    def finalJson = appendJsonEntries(baseParams, extraEntries)
+
+    def mergedParamFile = "${WORKSPACE}\\base_parameters_merged.json"
     writeFile file: mergedParamFile, text: finalJson
-    
-    echo ""
-    echo "Final merged parameters:"
-    echo finalJson
-    echo ""
-    echo "✓ Merged parameters written to: ${mergedParamFile}"
+
+    echo "Final merged Base parameters: ${finalJson}"
     return mergedParamFile
 }
 
 /**
- * Helper function: Extract a value from JSON using simple string operations
- * Handles JSON with or without spaces around colons
+ * Helper function: Build App Policies parameters with template URLs
  */
-def extractJsonValue(jsonStr, key) {
-    try {
-        // Debug: Check if JSON is empty or null
-        if (!jsonStr || jsonStr.trim().length() == 0 || jsonStr.trim() == '[]') {
-            echo "Debug: JSON output is empty for key: ${key}"
-            return ''
+def buildAppPoliciesParameters(appParamFile) {
+    echo "Building app_policies parameters with template URLs and stack outputs..."
+
+    def appParams = readFile(appParamFile).trim()
+    echo "Original app parameters: ${appParams}"
+
+    // Fetch only the specific outputs needed by app_policies.yaml
+    // S3BucketName and KMSKeyId from Base stack
+    def s3BucketName = bat(script: """
+        @echo off
+        aws cloudformation describe-stacks ^
+            --stack-name ${BASE_STACK_NAME} ^
+            --region ${AWS_DEFAULT_REGION} ^
+            --query "Stacks[0].Outputs[?OutputKey=='S3BucketName'].OutputValue" ^
+            --output text
+    """, returnStdout: true).trim()
+    echo "S3BucketName: ${s3BucketName}"
+
+    def kmsKeyId = bat(script: """
+        @echo off
+        aws cloudformation describe-stacks ^
+            --stack-name ${BASE_STACK_NAME} ^
+            --region ${AWS_DEFAULT_REGION} ^
+            --query "Stacks[0].Outputs[?OutputKey=='KMSKeyId'].OutputValue" ^
+            --output text
+    """, returnStdout: true).trim()
+    echo "KMSKeyId: ${kmsKeyId}"
+
+    // S3BucketRoleArn from Core stack
+    def s3BucketRoleArn = bat(script: """
+        @echo off
+        aws cloudformation describe-stacks ^
+            --stack-name ${CORE_STACK_NAME} ^
+            --region ${AWS_DEFAULT_REGION} ^
+            --query "Stacks[0].Outputs[?OutputKey=='S3BucketRoleArn'].OutputValue" ^
+            --output text
+    """, returnStdout: true).trim()
+    echo "S3BucketRoleArn: ${s3BucketRoleArn}"
+
+    // Build extra parameter entries: 3 stack outputs + 4 template URLs
+    def cumulusUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/cumulus/roles.yaml"
+    def dataapiUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/dataapi/roles.yaml"
+    def leanretinaUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/leanretina/roles.yaml"
+    def retinaUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/retina/roles.yaml"
+
+    def extraEntries = '{"ParameterKey":"S3BucketName","ParameterValue":"' + s3BucketName + '"},' +
+        '{"ParameterKey":"KMSKeyId","ParameterValue":"' + kmsKeyId + '"},' +
+        '{"ParameterKey":"S3BucketRoleArn","ParameterValue":"' + s3BucketRoleArn + '"},' +
+        '{"ParameterKey":"CumulusRolesTemplateURL","ParameterValue":"' + cumulusUrl + '"},' +
+        '{"ParameterKey":"DataAPIRolesTemplateURL","ParameterValue":"' + dataapiUrl + '"},' +
+        '{"ParameterKey":"LeanRetinaRolesTemplateURL","ParameterValue":"' + leanretinaUrl + '"},' +
+        '{"ParameterKey":"RetinaRolesTemplateURL","ParameterValue":"' + retinaUrl + '"}'
+
+    def finalJson = appendJsonEntries(appParams, extraEntries)
+
+    def mergedParamFile = "${WORKSPACE}\\app_policies_parameters_merged.json"
+    writeFile file: mergedParamFile, text: finalJson
+
+    echo "Final app_policies parameters: ${finalJson}"
+    return mergedParamFile
+}
+
+/**
+ * @NonCPS: Extracts a parameter value by key from a JSON parameter array.
+ */
+@NonCPS
+def extractParameterValue(String jsonText, String key) {
+    def slurper = new groovy.json.JsonSlurper()
+    def params = slurper.parseText(jsonText)
+    for (int i = 0; i < params.size(); i++) {
+        if (params[i].ParameterKey == key) {
+            return params[i].ParameterValue
         }
-        
-        // Search for the key (e.g., "S3BucketName")
-        def keyIndex = jsonStr.indexOf("\"${key}\"")
-        
-        echo "Debug: Searching for key '${key}' in JSON. Found at index: ${keyIndex}"
-        
-        if (keyIndex < 0) {
-            echo "Debug: Key not found: ${key}"
-            return ''
-        }
-        
-        // Find "Value" after the key
-        def valueKeyIndex = jsonStr.indexOf("\"Value\"", keyIndex)
-        
-        echo "Debug: Found 'Value' key at index: ${valueKeyIndex}"
-        
-        if (valueKeyIndex < 0) {
-            echo "Debug: Value key not found after ${key}"
-            return ''
-        }
-        
-        // Find the first quote after "Value" (skips past "Value": or "Value":")
-        def quoteStart = jsonStr.indexOf("\"", valueKeyIndex + "\"Value\"".length())
-        
-        echo "Debug: Found opening quote at index: ${quoteStart}"
-        
-        if (quoteStart < 0) {
-            echo "Debug: Could not find opening quote for value"
-            return ''
-        }
-        
-        // Find the closing quote
-        def quoteEnd = jsonStr.indexOf("\"", quoteStart + 1)
-        
-        echo "Debug: Found closing quote at index: ${quoteEnd}"
-        
-        if (quoteEnd < 0) {
-            echo "Debug: Could not find closing quote"
-            return ''
-        }
-        
-        // Extract the value between quotes
-        def extractedValue = jsonStr.substring(quoteStart + 1, quoteEnd)
-        echo "Debug: Extracted value for ${key}: ${extractedValue}"
-        return extractedValue
-    } catch (Exception e) {
-        echo "Warning: Could not extract ${key}: ${e.message}"
-        return ''
     }
+    return ''
+}
+
+/**
+ * @NonCPS: Appends raw JSON entries to a base parameters JSON array.
+ * Used by buildAppPoliciesParameters to inject template URL entries.
+ */
+@NonCPS
+def appendJsonEntries(String baseParamsJson, String extraEntries) {
+    def inner = ''
+    if (baseParamsJson.startsWith('[') && baseParamsJson.endsWith(']')) {
+        inner = baseParamsJson.substring(1, baseParamsJson.length() - 1).trim()
+    } else {
+        inner = baseParamsJson.trim()
+    }
+    if (inner.length() > 0) {
+        return '[' + inner + ',' + extraEntries + ']'
+    } else {
+        return '[' + extraEntries + ']'
+    }
+}
+
+/**
+ * @NonCPS: Parse nested stacks JSON and resolve physical stack names.
+ * Maps LogicalResourceId to PhysicalResourceId for discovered nested stacks.
+ * Returns a plain HashMap<String,String> (CPS-serializable) with only discovered stacks.
+ */
+@NonCPS
+def resolveStackNames(String jsonText, Map<String,String> defaults) {
+    def result = new HashMap<String,String>(defaults)
+    try {
+        def jsonSlurper = new groovy.json.JsonSlurper()
+        def stacks = jsonSlurper.parseText(jsonText) ?: []
+        for (int i = 0; i < stacks.size(); i++) {
+            def logical = (stacks[i].Logical ?: '').toString()
+            def physical = (stacks[i].Physical ?: '').toString()
+            if (logical && physical) {
+                result[logical] = physical
+            }
+        }
+    } catch (Exception e) {
+        // Return defaults on parse failure
+    }
+    return result
 }

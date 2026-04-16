@@ -26,6 +26,11 @@ Parameters:
     Type: String
     Description: KMS Key Role ARN from Core Stack
 
+Conditions:
+  IsProd: !Equals [!Ref EnvironmentName, 'prod']
+  IsTest: !Equals [!Ref EnvironmentName, 'test']
+  IsDev: !Equals [!Ref EnvironmentName, 'dev']
+
 Resources:
 
   # KMS Key for S3 Encryption
@@ -46,15 +51,15 @@ Resources:
             Action: 'kms:*'
             Resource: '*'
 
-    # Allow IAM user VarunJ (CRITICAL FIX)
+    # Allow IAM user Chinmay (CRITICAL FIX)
           - Sid: AllowDeploymentUser
             Effect: Allow
             Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/Varunj
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:user/Chinmay
             Action: 'kms:*'
             Resource: '*'
 
-    # CloudFormation / Admin Role access
+# CloudFormation / Admin Role access
           - Sid: AllowKeyAdminRole
             Effect: Allow
             Principal:

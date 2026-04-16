@@ -36,6 +36,16 @@ pipeline {
             defaultValue: 'ascend-test-poc',
             description: 'S3 bucket containing CloudFormation templates'
         )
+        string(
+            name: 'S3_TEMPLATES_PREFIX',
+            defaultValue: 'infrastructure/cloudformation',
+            description: 'S3 key prefix for CloudFormation templates (no leading/trailing slash)'
+        )
+        string(
+            name: 'AWS_CREDENTIALS_ID',
+            defaultValue: 'aws-credentials',
+            description: 'Jenkins credentials ID for AWS access'
+        )
         booleanParam(
             name: 'DEPLOY_APP',
             defaultValue: true,
@@ -44,20 +54,25 @@ pipeline {
     }
     
     environment {
-        PROJECT_NAME = 'ascend'
-	AWS_CREDS = credentials('aws-credentials')
+	AWS_CREDS = credentials("${params.AWS_CREDENTIALS_ID}")
         AWS_DEFAULT_REGION = "${params.AWS_REGION}"
+        S3_TEMPLATES_PREFIX = "${params.S3_TEMPLATES_PREFIX}"
         TEMPLATES_PATH = "${WORKSPACE}\\infrastructure\\cloudformation"
         CONFIGS_PATH = "${WORKSPACE}\\infrastructure\\configs"
         ENVIRONMENT = "${params.ENVIRONMENT}"
         ACTION = "${params.ACTION}"
-        MAIN_STACK_NAME = "${PROJECT_NAME}-main-stack-${params.ENVIRONMENT}"
     }
     
     stages {
         stage('Validation') {
             steps {
                 script {
+                    // Read PROJECT_NAME from parameters.json
+                    def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\parameters.json"
+                    def paramJson = readFile(paramFile).trim()
+                    env.PROJECT_NAME = extractParameterValue(paramJson, 'ProjectName')
+                    env.MAIN_STACK_NAME = "${PROJECT_NAME}-main-stack-${ENVIRONMENT}"
+
                     echo "========== Pipeline Configuration =========="
                     echo "Project: ${PROJECT_NAME}"
                     echo "Environment: ${ENVIRONMENT}"
@@ -142,39 +157,39 @@ pipeline {
                     powershell """
                         # Upload core template
                         aws s3 cp "${TEMPLATES_PATH}/core/core_iam_roles.yaml" `
-                            "s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/core/core_iam_roles.yaml" `
+                            "s3://${CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/core/core_iam_roles.yaml" `
                             --region ${AWS_DEFAULT_REGION}
                         
                         # Upload base template
                         aws s3 cp "${TEMPLATES_PATH}/base/base_s3_kms.yaml" `
-                            "s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/base/base_s3_kms.yaml" `
+                            "s3://${CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/base/base_s3_kms.yaml" `
                             --region ${AWS_DEFAULT_REGION}
                         
                         # Upload app template
                         aws s3 cp "${TEMPLATES_PATH}/app/app_policies.yaml" `
-                            "s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/app/app_policies.yaml" `
+                            "s3://${CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/app/app_policies.yaml" `
                             --region ${AWS_DEFAULT_REGION}
 
                         # Upload app role templates
                         aws s3 cp "${TEMPLATES_PATH}/app/cumulus/roles.yaml" `
-                            "s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/app/cumulus/roles.yaml" `
+                            "s3://${CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/app/cumulus/roles.yaml" `
                             --region ${AWS_DEFAULT_REGION}
 
                         aws s3 cp "${TEMPLATES_PATH}/app/retina/roles.yaml" `
-                            "s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/app/retina/roles.yaml" `
+                            "s3://${CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/app/retina/roles.yaml" `
                             --region ${AWS_DEFAULT_REGION}
 
                         aws s3 cp "${TEMPLATES_PATH}/app/dataapi/roles.yaml" `
-                            "s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/app/dataapi/roles.yaml" `
+                            "s3://${CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/app/dataapi/roles.yaml" `
                             --region ${AWS_DEFAULT_REGION}
 
                         aws s3 cp "${TEMPLATES_PATH}/app/leanretina/roles.yaml" `
-                            "s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/app/leanretina/roles.yaml" `
+                            "s3://${CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/app/leanretina/roles.yaml" `
                             --region ${AWS_DEFAULT_REGION}
                         
                         # Upload main template
                         aws s3 cp "${TEMPLATES_PATH}/main/main_template.yaml" `
-                            "s3://${CF_TEMPLATES_BUCKET}/infrastructure/cloudformation/main/main_template.yaml" `
+                            "s3://${CF_TEMPLATES_BUCKET}/${S3_TEMPLATES_PREFIX}/main/main_template.yaml" `
                             --region ${AWS_DEFAULT_REGION}
                         
                         Write-Host "✓ All templates uploaded to S3"
@@ -188,8 +203,10 @@ stage('Deploy Main Stack') {
         script {
             echo "🚀 Deploying Main Stack (${MAIN_STACK_NAME})..."
 
-            def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\main_parameters.json"
-            def templateUrl = "https://${CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/infrastructure/cloudformation/main/main_template.yaml"
+            def paramFile = "${CONFIGS_PATH}\\${ENVIRONMENT}\\parameters.json"
+            paramFile = buildMainStackParameters(paramFile)
+            
+            def templateUrl = "https://${CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/main/main_template.yaml"
 
             echo "Template URL: ${templateUrl}"
             echo "Parameter File: ${paramFile}"
@@ -427,4 +444,93 @@ Nested Stacks:
             }
         }
     }
+}
+
+/**
+ * Helper function: Build main stack parameters with template URLs for nested stacks
+ */
+def buildMainStackParameters(paramFile) {
+    echo "Building main stack parameters with template URLs for nested stacks..."
+    
+    // Read the base parameters
+    def baseParams = readFile(paramFile).trim()
+    echo "Original parameters:"
+    echo baseParams
+    
+    // Build the template URLs for nested stacks
+    def coreUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/core/core_iam_roles.yaml"
+    def baseUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/base/base_s3_kms.yaml"
+    def appUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/app_policies.yaml"
+    def cumulusUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/cumulus/roles.yaml"
+    def dataapiUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/dataapi/roles.yaml"
+    def leanretinaUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/leanretina/roles.yaml"
+    def retinaUrl = "https://${params.CF_TEMPLATES_BUCKET}.s3.${AWS_DEFAULT_REGION}.amazonaws.com/${S3_TEMPLATES_PREFIX}/app/retina/roles.yaml"
+    
+    // Build merged parameters
+    def mergedJson = new StringBuilder()
+    
+    // Remove outer brackets from base parameters and add them
+    if (baseParams.startsWith('[') && baseParams.endsWith(']')) {
+        mergedJson.append(baseParams.substring(1, baseParams.length() - 1))
+    } else {
+        mergedJson.append(baseParams)
+    }
+    
+    // Append template URL parameters
+    mergedJson.append(',')
+    mergedJson.append('{"ParameterKey":"CoreTemplateURL","ParameterValue":"' + coreUrl + '"}')
+    echo "✓ Added CoreTemplateURL: ${coreUrl}"
+    
+    mergedJson.append(',')
+    mergedJson.append('{"ParameterKey":"BaseTemplateURL","ParameterValue":"' + baseUrl + '"}')
+    echo "✓ Added BaseTemplateURL: ${baseUrl}"
+    
+    mergedJson.append(',')
+    mergedJson.append('{"ParameterKey":"AppTemplateURL","ParameterValue":"' + appUrl + '"}')
+    echo "✓ Added AppTemplateURL: ${appUrl}"
+    
+    mergedJson.append(',')
+    mergedJson.append('{"ParameterKey":"CumulusRolesTemplateURL","ParameterValue":"' + cumulusUrl + '"}')
+    echo "✓ Added CumulusRolesTemplateURL: ${cumulusUrl}"
+    
+    mergedJson.append(',')
+    mergedJson.append('{"ParameterKey":"DataAPIRolesTemplateURL","ParameterValue":"' + dataapiUrl + '"}')
+    echo "✓ Added DataAPIRolesTemplateURL: ${dataapiUrl}"
+    
+    mergedJson.append(',')
+    mergedJson.append('{"ParameterKey":"LeanRetinaRolesTemplateURL","ParameterValue":"' + leanretinaUrl + '"}')
+    echo "✓ Added LeanRetinaRolesTemplateURL: ${leanretinaUrl}"
+    
+    mergedJson.append(',')
+    mergedJson.append('{"ParameterKey":"RetinaRolesTemplateURL","ParameterValue":"' + retinaUrl + '"}')
+    echo "✓ Added RetinaRolesTemplateURL: ${retinaUrl}"
+    
+    // Wrap in brackets
+    def finalJson = '[' + mergedJson.toString() + ']'
+    
+    // Write merged parameters to file
+    def mergedParamFile = "${WORKSPACE}\\main_stack_parameters_merged.json"
+    writeFile file: mergedParamFile, text: finalJson
+    
+    echo ""
+    echo "Final main stack parameters with template URLs:"
+    echo finalJson
+    echo ""
+    echo "✓ Parameters written to: ${mergedParamFile}"
+    return mergedParamFile
+}
+
+/**
+ * @NonCPS: Extracts a parameter value by key from a JSON parameter array.
+ */
+@NonCPS
+def extractParameterValue(String jsonText, String key) {
+    def slurper = new groovy.json.JsonSlurper()
+    def params = slurper.parseText(jsonText)
+    for (int i = 0; i < params.size(); i++) {
+        if (params[i].ParameterKey == key) {
+            return params[i].ParameterValue
+        }
+    }
+    return ''
 }
