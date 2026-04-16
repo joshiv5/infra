@@ -69,6 +69,7 @@ Resources:
             Principal:
               Service:
                 - ec2.amazonaws.com
+                - ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
       Path: /
       Tags:
